@@ -2,6 +2,10 @@
 name = "sysclean"
 version = "0.1.0"
 edition = "2024"
+authors = ["dlivxpr"]
+description = "A TUI disk cleanup tool for Windows 11, focused on dev tool cache cleanup and home directory space analysis"
+license = "MIT"
+repository = "https://github.com/dlivxpr/sysclean"
 
 [dependencies]
 anyhow = "1.0.100"
