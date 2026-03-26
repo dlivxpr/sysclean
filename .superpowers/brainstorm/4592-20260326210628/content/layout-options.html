@@ -1,0 +1,150 @@
+<h2>TUI 布局方案对比</h2>
+<p class="subtitle">目标：去掉原本底部任务进度区，把进度条收进右上角；底部改成当前页面最常用的 5-7 个快捷键，降低信息噪音。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">方案 A · 平衡型</div>
+        <div class="mockup-body" style="background:#241f38;color:#eef5f7;padding:12px;border-radius:10px;">
+          <div style="display:flex;gap:12px;align-items:stretch;">
+            <div style="width:38%;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+              <div style="font-weight:700;margin-bottom:8px;">SysClean</div>
+              <div style="display:flex;gap:8px;">
+                <div style="background:#29485d;padding:4px 8px;border-radius:6px;">Cache Cleanup</div>
+                <div style="background:#8ed6db;color:#132635;padding:4px 8px;border-radius:6px;">Space Explorer</div>
+              </div>
+            </div>
+            <div style="flex:1;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div>
+                  <div style="font-weight:700;">状态</div>
+                  <div style="opacity:.9;">目录骨架已从缓存加载，按 r 可强制重扫</div>
+                </div>
+                <div style="min-width:180px;text-align:right;">
+                  <div style="font-size:12px;opacity:.85;">扫描进度 42%</div>
+                  <div style="height:8px;background:#46546a;border-radius:999px;overflow:hidden;">
+                    <div style="width:42%;height:100%;background:#8ed6db;"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:10px;height:120px;border:1px dashed #5b6878;border-radius:8px;display:flex;align-items:center;justify-content:center;opacity:.75;">主内容区保持现状</div>
+          <div style="margin-top:10px;border:1px solid #8ecfd5;border-radius:8px;padding:8px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span>↑↓ 选择</span>
+            <span>Enter 进入</span>
+            <span>Backspace 返回</span>
+            <span>/ 过滤</span>
+            <span>o 打开目录</span>
+            <span>r 重扫</span>
+            <span>? 帮助</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>方案 A</h3>
+      <p>信息层次最稳，右上角进度条紧贴状态信息，底部用一行标签式快捷键，适合长期使用。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">方案 B · 强提示</div>
+        <div class="mockup-body" style="background:#241f38;color:#eef5f7;padding:12px;border-radius:10px;">
+          <div style="display:flex;gap:12px;align-items:stretch;">
+            <div style="width:38%;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+              <div style="font-weight:700;margin-bottom:8px;">SysClean</div>
+              <div style="display:flex;gap:8px;">
+                <div style="background:#29485d;padding:4px 8px;border-radius:6px;">Cache Cleanup</div>
+                <div style="background:#8ed6db;color:#132635;padding:4px 8px;border-radius:6px;">Space Explorer</div>
+              </div>
+            </div>
+            <div style="flex:1;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+                <div>
+                  <div style="font-weight:700;">状态</div>
+                  <div style="opacity:.9;">正在扫描目录大小，结果会持续重排</div>
+                </div>
+                <div style="min-width:210px;background:#1b3144;border:1px solid #8ed6db;border-radius:8px;padding:8px;">
+                  <div style="display:flex;justify-content:space-between;font-size:12px;">
+                    <span>后台任务</span>
+                    <span>42%</span>
+                  </div>
+                  <div style="height:10px;background:#46546a;border-radius:999px;overflow:hidden;margin-top:6px;">
+                    <div style="width:42%;height:100%;background:linear-gradient(90deg,#60c4d3,#c5f6f8);"></div>
+                  </div>
+                  <div style="font-size:12px;opacity:.85;margin-top:6px;">已完成 18 / 43 项</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:10px;height:120px;border:1px dashed #5b6878;border-radius:8px;display:flex;align-items:center;justify-content:center;opacity:.75;">主内容区保持现状</div>
+          <div style="margin-top:10px;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+            <div style="font-size:12px;opacity:.8;margin-bottom:6px;">常用快捷键</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <span style="background:#29485d;padding:4px 8px;border-radius:999px;">↑↓ 选择</span>
+              <span style="background:#29485d;padding:4px 8px;border-radius:999px;">Enter 进入</span>
+              <span style="background:#29485d;padding:4px 8px;border-radius:999px;">Backspace 返回</span>
+              <span style="background:#29485d;padding:4px 8px;border-radius:999px;">/ 过滤</span>
+              <span style="background:#29485d;padding:4px 8px;border-radius:999px;">o 打开目录</span>
+              <span style="background:#29485d;padding:4px 8px;border-radius:999px;">r 重扫</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>方案 B</h3>
+      <p>更强调任务感，进度条像一个独立小组件，进度信息更完整，适合扫描时让人一眼注意到。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">方案 C · 极简型</div>
+        <div class="mockup-body" style="background:#241f38;color:#eef5f7;padding:12px;border-radius:10px;">
+          <div style="display:flex;gap:12px;align-items:stretch;">
+            <div style="width:38%;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+              <div style="font-weight:700;margin-bottom:8px;">SysClean</div>
+              <div style="display:flex;gap:8px;">
+                <div style="background:#29485d;padding:4px 8px;border-radius:6px;">Cache Cleanup</div>
+                <div style="background:#8ed6db;color:#132635;padding:4px 8px;border-radius:6px;">Space Explorer</div>
+              </div>
+            </div>
+            <div style="flex:1;border:1px solid #8ecfd5;border-radius:8px;padding:8px;">
+              <div style="font-weight:700;">状态</div>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
+                <div style="flex:1;opacity:.9;">正在扫描目录大小</div>
+                <div style="width:140px;height:6px;background:#46546a;border-radius:999px;overflow:hidden;">
+                  <div style="width:42%;height:100%;background:#8ed6db;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:10px;height:120px;border:1px dashed #5b6878;border-radius:8px;display:flex;align-items:center;justify-content:center;opacity:.75;">主内容区保持现状</div>
+          <div style="margin-top:10px;border:1px solid #8ecfd5;border-radius:8px;padding:8px;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">
+            <div>↑↓ 选择</div>
+            <div>Enter 进入</div>
+            <div>Backspace 返回</div>
+            <div>/ 过滤</div>
+            <div>o 打开目录</div>
+            <div>r 重扫</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>方案 C</h3>
+      <p>尽量不抢主内容注意力，但进度存在感最弱，适合你想把界面做得很克制的时候。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>我的建议</h3>
+  <p>优先考虑方案 A。它最像这套界面现在的语言，改动克制，右上角进度条可见但不突兀，底部也更像“上手提示”而不是状态栏。</p>
+</div>
