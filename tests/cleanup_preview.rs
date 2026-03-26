@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use sysclean::cache_cleaner::{CacheDiscovery, CacheTargetKind, build_cleanup_preview};
+use sysclean::cache_cleaner::{
+    CacheDiscovery, CacheSizeState, CacheTargetKind, build_cleanup_preview,
+};
 
 #[test]
 fn cleanup_preview_sums_only_selected_items() {
@@ -10,6 +12,7 @@ fn cleanup_preview_sums_only_selected_items() {
         vec![PathBuf::from("npm")],
     );
     npm.selected = true;
+    npm.size_state = CacheSizeState::Ready;
     npm.reclaimable_bytes = Some(500);
 
     let mut cargo = CacheDiscovery::new(
@@ -18,6 +21,7 @@ fn cleanup_preview_sums_only_selected_items() {
         vec![PathBuf::from("cargo")],
     );
     cargo.selected = false;
+    cargo.size_state = CacheSizeState::Ready;
     cargo.reclaimable_bytes = Some(800);
 
     let preview = build_cleanup_preview(&[npm, cargo]);

@@ -16,6 +16,23 @@ pub enum CacheTargetKind {
     Cargo,
 }
 
+pub const SUPPORTED_CACHE_TARGETS: [CacheTargetKind; 5] = [
+    CacheTargetKind::Uv,
+    CacheTargetKind::Npm,
+    CacheTargetKind::Pnpm,
+    CacheTargetKind::Docker,
+    CacheTargetKind::Cargo,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheSizeState {
+    Pending,
+    Scanning,
+    Ready,
+    Unavailable,
+    Error,
+}
+
 impl CacheTargetKind {
     pub fn display_name(self) -> &'static str {
         match self {
@@ -80,6 +97,7 @@ pub struct CacheDiscovery {
     pub description: String,
     pub paths: Vec<PathBuf>,
     pub available: bool,
+    pub size_state: CacheSizeState,
     pub reclaimable_bytes: Option<u64>,
     pub total_bytes: u64,
     pub selected: bool,
@@ -94,6 +112,7 @@ impl CacheDiscovery {
             description: kind.description().to_string(),
             paths,
             available: true,
+            size_state: CacheSizeState::Pending,
             reclaimable_bytes: None,
             total_bytes: 0,
             selected: false,
@@ -116,6 +135,19 @@ pub struct CleanupOutcome {
 }
 
 pub fn discover_cache_target(
+    kind: CacheTargetKind,
+    runner: &impl CommandRunner,
+    user_profile: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+) -> Result<CacheDiscovery> {
+    let mut discovery = discover_cache_metadata(kind, runner, user_profile, local_app_data)?;
+    if kind != CacheTargetKind::Docker {
+        populate_cache_size(&mut discovery)?;
+    }
+    Ok(discovery)
+}
+
+pub fn discover_cache_metadata(
     kind: CacheTargetKind,
     runner: &impl CommandRunner,
     user_profile: Option<PathBuf>,
@@ -178,11 +210,13 @@ pub fn discover_cache_target(
             match output {
                 Ok(output) => {
                     discovery.available = true;
+                    discovery.size_state = CacheSizeState::Ready;
                     discovery.note = Some("仅清理 docker builder cache".into());
                     discovery.reclaimable_bytes = parse_docker_reclaimable(&output.stdout);
                 }
                 Err(_) => {
                     discovery.available = false;
+                    discovery.size_state = CacheSizeState::Unavailable;
                     discovery.note = Some("未检测到 docker CLI 或当前会话不可用".into());
                 }
             }
@@ -194,19 +228,55 @@ pub fn discover_cache_target(
         discovery.paths.dedup();
         discovery.available =
             discovery.paths.iter().any(|path| path.exists()) || !discovery.paths.is_empty();
-        discovery.total_bytes = discovery
-            .paths
-            .iter()
-            .filter_map(|path| compute_path_size(path).ok())
-            .sum();
-        discovery.reclaimable_bytes = Some(discovery.total_bytes);
         if discovery.paths.is_empty() {
             discovery.available = false;
+            discovery.size_state = CacheSizeState::Unavailable;
             discovery.note = Some("未发现缓存路径".into());
+        } else {
+            discovery.size_state = CacheSizeState::Pending;
         }
     }
 
     Ok(discovery)
+}
+
+pub fn populate_cache_size(item: &mut CacheDiscovery) -> Result<()> {
+    if !item.available {
+        item.size_state = CacheSizeState::Unavailable;
+        item.reclaimable_bytes = None;
+        item.total_bytes = 0;
+        return Ok(());
+    }
+
+    if item.kind == CacheTargetKind::Docker {
+        item.size_state = if item.reclaimable_bytes.is_some() {
+            CacheSizeState::Ready
+        } else {
+            CacheSizeState::Error
+        };
+        return Ok(());
+    }
+
+    item.size_state = CacheSizeState::Scanning;
+    let mut total_bytes = 0_u64;
+    let mut had_error = false;
+    for path in &item.paths {
+        match compute_path_size(path) {
+            Ok(size) => total_bytes += size,
+            Err(error) => {
+                had_error = true;
+                item.note = Some(format!("{} 统计失败: {error}", path.display()));
+            }
+        }
+    }
+    item.total_bytes = total_bytes;
+    item.reclaimable_bytes = Some(total_bytes);
+    item.size_state = if had_error {
+        CacheSizeState::Error
+    } else {
+        CacheSizeState::Ready
+    };
+    Ok(())
 }
 
 pub fn discover_all_caches(
@@ -214,14 +284,7 @@ pub fn discover_all_caches(
     user_profile: PathBuf,
     local_app_data: PathBuf,
 ) -> Result<Vec<CacheDiscovery>> {
-    let kinds = [
-        CacheTargetKind::Uv,
-        CacheTargetKind::Npm,
-        CacheTargetKind::Pnpm,
-        CacheTargetKind::Docker,
-        CacheTargetKind::Cargo,
-    ];
-    kinds
+    SUPPORTED_CACHE_TARGETS
         .into_iter()
         .map(|kind| {
             discover_cache_target(
@@ -231,12 +294,21 @@ pub fn discover_all_caches(
                 Some(local_app_data.clone()),
             )
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .map(|mut items| {
+            for item in &mut items {
+                let _ = populate_cache_size(item);
+            }
+            items
+        })
 }
 
 pub fn build_cleanup_preview(items: &[CacheDiscovery]) -> CleanupPreview {
-    let selected: Vec<CacheDiscovery> =
-        items.iter().filter(|item| item.selected).cloned().collect();
+    let selected: Vec<CacheDiscovery> = items
+        .iter()
+        .filter(|item| item.selected && item.size_state == CacheSizeState::Ready)
+        .cloned()
+        .collect();
     let total_reclaimable_bytes = selected
         .iter()
         .map(|item| item.reclaimable_bytes.unwrap_or(item.total_bytes))

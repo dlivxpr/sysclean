@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::cache_cleaner::{CacheDiscovery, CleanupPreview, build_cleanup_preview};
+use crate::cache_cleaner::{CacheDiscovery, CacheSizeState, CleanupPreview, build_cleanup_preview};
 use crate::models::{BackgroundTaskStatus, DirectoryEntryInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,7 @@ pub struct ExplorerListState {
 
 impl ExplorerListState {
     pub fn set_entries(&mut self, mut entries: Vec<DirectoryEntryInfo>) {
+        let selected_path = self.selected_entry().map(|entry| entry.path.clone());
         entries.sort_by(|left, right| {
             right
                 .size_bytes
@@ -33,6 +34,19 @@ impl ExplorerListState {
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
         });
         self.entries = entries;
+        if let Some(path) = selected_path
+            && let Some(index) = self.visible_indices().into_iter().find(|index| {
+                self.entries
+                    .get(*index)
+                    .is_some_and(|entry| entry.path == path)
+            })
+        {
+            self.selected_index = self
+                .visible_indices()
+                .iter()
+                .position(|visible_index| *visible_index == index)
+                .unwrap_or(0);
+        }
         self.clamp_selection();
     }
 
@@ -49,6 +63,10 @@ impl ExplorerListState {
             .filter(|item| filter.is_empty() || item.name.to_lowercase().contains(&filter))
             .cloned()
             .collect()
+    }
+
+    pub fn entries(&self) -> &[DirectoryEntryInfo] {
+        &self.entries
     }
 
     pub fn select_first(&mut self) {
@@ -185,6 +203,27 @@ impl App {
         self.cache_selected_index = 0;
     }
 
+    pub fn upsert_cache_item(&mut self, mut item: CacheDiscovery) {
+        let selected_kind = self.selected_cache().map(|selected| selected.kind);
+        if let Some(index) = self
+            .cache_items
+            .iter()
+            .position(|existing| existing.kind == item.kind)
+        {
+            item.selected = self.cache_items[index].selected;
+            self.cache_items[index] = item;
+            return;
+        }
+        self.cache_items.push(item);
+        self.cache_items
+            .sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+        self.cache_selected_index = self
+            .cache_items
+            .iter()
+            .position(|existing| Some(existing.kind) == selected_kind)
+            .unwrap_or(0);
+    }
+
     pub fn set_current_path(&mut self, path: PathBuf) {
         self.path_history = vec![path.clone()];
         self.current_path = Some(path);
@@ -250,6 +289,19 @@ impl App {
     }
 
     pub fn open_delete_confirmation(&mut self) {
+        let waiting_items = self
+            .cache_items
+            .iter()
+            .filter(|item| item.selected && item.size_state != CacheSizeState::Ready)
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>();
+        if !waiting_items.is_empty() {
+            self.active_dialog = ActiveDialog::None;
+            self.status_message =
+                format!("请等待所选缓存大小计算完成: {}", waiting_items.join(", "));
+            self.last_cleanup_preview = None;
+            return;
+        }
         let preview = build_cleanup_preview(&self.cache_items);
         if preview.items.is_empty() {
             self.active_dialog = ActiveDialog::None;

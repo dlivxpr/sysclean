@@ -14,27 +14,53 @@ use ratatui::backend::CrosstermBackend;
 
 use sysclean::app::{ActiveDialog, App, Page};
 use sysclean::cache_cleaner::{
-    CacheDiscovery, CleanupOutcome, SystemCommandRunner, compute_path_size, discover_all_caches,
-    execute_cleanup,
+    CacheDiscovery, CacheSizeState, CleanupOutcome, SUPPORTED_CACHE_TARGETS, SystemCommandRunner,
+    compute_path_size, discover_cache_metadata, execute_cleanup, populate_cache_size,
 };
-use sysclean::models::{BackgroundTaskStatus, DirectoryEntryInfo};
+use sysclean::models::{BackgroundTaskStatus, DirectoryEntryInfo, ScanState};
 use sysclean::persistence::{CacheSnapshot, ScanCache};
 use sysclean::platform;
-use sysclean::space_explorer::load_directory_entries;
+use sysclean::space_explorer::{discover_directory_skeleton, load_directory_entries};
 use sysclean::ui::{InputMode, render};
 
 #[derive(Debug)]
 enum WorkerMessage {
-    CacheScanFinished(Vec<CacheDiscovery>),
+    CacheDiscoveryStarted {
+        task_id: u64,
+        total: usize,
+    },
+    CacheItemDiscovered {
+        task_id: u64,
+        item: CacheDiscovery,
+        discovered: usize,
+        total: usize,
+    },
+    CacheItemSized {
+        task_id: u64,
+        item: CacheDiscovery,
+        completed: usize,
+        total: usize,
+    },
+    CacheScanFinished {
+        task_id: u64,
+        total: usize,
+    },
     DirectoryScanStarted {
         task_id: u64,
         path: PathBuf,
     },
-    DirectoryScanProgress {
+    DirectoryEntriesDiscovered {
         task_id: u64,
         path: PathBuf,
         entries: Vec<DirectoryEntryInfo>,
-        scanned: usize,
+        total: usize,
+        from_cache: bool,
+    },
+    DirectoryEntryUpdated {
+        task_id: u64,
+        path: PathBuf,
+        entry: DirectoryEntryInfo,
+        completed: usize,
         total: usize,
         from_cache: bool,
     },
@@ -60,18 +86,19 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
     let mut app = App::default();
     let mut input_mode = InputMode::Normal;
     let mut cleanup_results = Vec::new();
-    let mut latest_scan_task_id = 1_u64;
+    let mut latest_directory_task_id = 1_u64;
+    let mut latest_cache_task_id = 1_u64;
 
     let home = platform::home_dir()?;
     app.set_current_path(home.clone());
     app.task_status = Some(BackgroundTaskStatus::new(
         "启动",
-        "正在扫描缓存和目录",
+        "正在准备缓存与目录扫描",
         true,
     ));
 
-    spawn_cache_scan(tx.clone());
-    spawn_directory_scan(tx.clone(), latest_scan_task_id, home, false);
+    spawn_cache_scan(tx.clone(), latest_cache_task_id);
+    spawn_directory_scan(tx.clone(), latest_directory_task_id, home, false);
 
     loop {
         terminal.draw(|frame| render(frame, &app, input_mode, &cleanup_results))?;
@@ -80,7 +107,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
             handle_worker_message(
                 &mut app,
                 &mut cleanup_results,
-                &mut latest_scan_task_id,
+                &mut latest_directory_task_id,
+                &mut latest_cache_task_id,
                 message,
             );
         }
@@ -94,7 +122,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
                     &mut input_mode,
                     &mut cleanup_results,
                     &tx,
-                    &mut latest_scan_task_id,
+                    &mut latest_directory_task_id,
+                    &mut latest_cache_task_id,
                     key,
                 )?
             {
@@ -109,37 +138,84 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
 fn handle_worker_message(
     app: &mut App,
     cleanup_results: &mut Vec<CleanupOutcome>,
-    latest_scan_task_id: &mut u64,
+    latest_directory_task_id: &mut u64,
+    latest_cache_task_id: &mut u64,
     message: WorkerMessage,
 ) {
     match message {
-        WorkerMessage::CacheScanFinished(items) => {
-            app.set_cache_items(items);
-            app.status_message = "缓存扫描完成".into();
+        WorkerMessage::CacheDiscoveryStarted { task_id, total } => {
+            *latest_cache_task_id = task_id;
+            app.task_status = Some(progress_status(
+                "缓存扫描",
+                format!("已发现 0/{total} 个缓存目标"),
+                0,
+                total,
+            ));
+        }
+        WorkerMessage::CacheItemDiscovered {
+            task_id,
+            item,
+            discovered,
+            total,
+        } => {
+            if task_id != *latest_cache_task_id {
+                return;
+            }
+            app.upsert_cache_item(item);
+            app.task_status = Some(progress_status(
+                "缓存扫描",
+                format!("已发现 {discovered}/{total} 个缓存目标，正在计算大小"),
+                discovered,
+                total,
+            ));
+        }
+        WorkerMessage::CacheItemSized {
+            task_id,
+            item,
+            completed,
+            total,
+        } => {
+            if task_id != *latest_cache_task_id {
+                return;
+            }
+            app.upsert_cache_item(item);
+            app.task_status = Some(progress_status(
+                "缓存扫描",
+                format!("已发现 {total}/{total} 个缓存目标，正在计算 {completed}/{total} 个大小"),
+                completed,
+                total,
+            ));
+        }
+        WorkerMessage::CacheScanFinished { task_id, total } => {
+            if task_id != *latest_cache_task_id {
+                return;
+            }
+            app.status_message = if total == 0 {
+                "未发现可扫描的缓存目标".into()
+            } else {
+                "缓存路径已全部展示，大小计算完成".into()
+            };
             if matches!(app.page(), Page::CacheCleanup) {
                 app.task_status = None;
             }
         }
         WorkerMessage::DirectoryScanStarted { task_id, path } => {
-            *latest_scan_task_id = task_id;
-            if app.current_path().is_none() {
-                app.set_current_path(path);
-            }
-            app.task_status = Some(BackgroundTaskStatus::new(
+            *latest_directory_task_id = task_id;
+            app.task_status = Some(progress_status(
                 "目录扫描",
-                "正在统计目录大小",
-                true,
+                format!("正在枚举 {} 的直接子目录", path.display()),
+                0,
+                0,
             ));
         }
-        WorkerMessage::DirectoryScanProgress {
+        WorkerMessage::DirectoryEntriesDiscovered {
             task_id,
             path,
             entries,
-            scanned,
             total,
             from_cache,
         } => {
-            if task_id != *latest_scan_task_id {
+            if task_id != *latest_directory_task_id {
                 return;
             }
             if app
@@ -147,21 +223,51 @@ fn handle_worker_message(
                 .map(|current| current != &path)
                 .unwrap_or(true)
             {
-                app.set_current_path(path);
+                return;
             }
             app.explorer_state_mut().set_entries(entries);
-            let mut task = BackgroundTaskStatus::new(
+            app.task_status = Some(progress_status(
                 "目录扫描",
                 if from_cache {
-                    "已加载缓存结果"
+                    format!("已从缓存加载 {total} 个子目录")
                 } else {
-                    "正在渐进更新列表"
+                    format!("已枚举 {total} 个子目录，正在逐项计算大小")
                 },
-                true,
-            );
-            task.progress_current = scanned;
-            task.progress_total = total;
-            app.task_status = Some(task);
+                0,
+                total,
+            ));
+        }
+        WorkerMessage::DirectoryEntryUpdated {
+            task_id,
+            path,
+            entry,
+            completed,
+            total,
+            from_cache,
+        } => {
+            if task_id != *latest_directory_task_id {
+                return;
+            }
+            if app
+                .current_path()
+                .map(|current| current != &path)
+                .unwrap_or(true)
+            {
+                return;
+            }
+            let mut entries = app.explorer_state().entries().to_vec();
+            upsert_directory_entry(&mut entries, entry);
+            app.explorer_state_mut().set_entries(entries);
+            app.task_status = Some(progress_status(
+                "目录扫描",
+                if from_cache {
+                    format!("缓存结果已加载 {completed}/{total}")
+                } else {
+                    format!("已枚举 {total} 个子目录，正在计算第 {completed}/{total} 个")
+                },
+                completed,
+                total,
+            ));
         }
         WorkerMessage::DirectoryScanFinished {
             task_id,
@@ -169,7 +275,7 @@ fn handle_worker_message(
             entries,
             from_cache,
         } => {
-            if task_id != *latest_scan_task_id {
+            if task_id != *latest_directory_task_id {
                 return;
             }
             if app
@@ -177,14 +283,14 @@ fn handle_worker_message(
                 .map(|current| current != &path)
                 .unwrap_or(true)
             {
-                app.set_current_path(path);
+                return;
             }
             app.explorer_state_mut().set_entries(entries);
             app.task_status = None;
             app.status_message = if from_cache {
-                "目录结果来自本地缓存，按 r 可强制重扫".into()
+                "目录骨架已从缓存加载，按 r 可强制重扫".into()
             } else {
-                "目录扫描完成".into()
+                "目录骨架已展示，大小已渐进更新完成".into()
             };
         }
         WorkerMessage::CleanupFinished(results) => {
@@ -206,7 +312,8 @@ fn handle_key_event(
     input_mode: &mut InputMode,
     cleanup_results: &mut Vec<CleanupOutcome>,
     tx: &Sender<WorkerMessage>,
-    latest_scan_task_id: &mut u64,
+    latest_directory_task_id: &mut u64,
+    latest_cache_task_id: &mut u64,
     key: KeyEvent,
 ) -> Result<bool> {
     if *input_mode == InputMode::Filtering {
@@ -224,10 +331,11 @@ fn handle_key_event(
             match key.code {
                 KeyCode::Esc => app.close_dialog(),
                 KeyCode::Enter => {
-                    app.task_status = Some(BackgroundTaskStatus::new(
+                    app.task_status = Some(progress_status(
                         "缓存清理",
-                        "正在删除所选缓存",
-                        true,
+                        "正在删除已完成大小计算的缓存项".into(),
+                        0,
+                        0,
                     ));
                     spawn_cleanup(tx.clone(), app.cache_items().to_vec());
                 }
@@ -254,9 +362,9 @@ fn handle_key_event(
             app.status_message = "已取消当前任务显示，旧结果会被忽略".into();
         }
         _ => match app.page() {
-            Page::CacheCleanup => handle_cache_keys(app, tx, key),
+            Page::CacheCleanup => handle_cache_keys(app, tx, latest_cache_task_id, key),
             Page::SpaceExplorer => {
-                handle_explorer_keys(app, input_mode, tx, latest_scan_task_id, key)?
+                handle_explorer_keys(app, input_mode, tx, latest_directory_task_id, key)?
             }
         },
     }
@@ -264,19 +372,26 @@ fn handle_key_event(
     Ok(false)
 }
 
-fn handle_cache_keys(app: &mut App, tx: &Sender<WorkerMessage>, key: KeyEvent) {
+fn handle_cache_keys(
+    app: &mut App,
+    tx: &Sender<WorkerMessage>,
+    latest_cache_task_id: &mut u64,
+    key: KeyEvent,
+) {
     match key.code {
         KeyCode::Up => app.select_previous_cache(),
         KeyCode::Down => app.select_next_cache(),
         KeyCode::Char(' ') => app.toggle_selected_cache(),
         KeyCode::Char('a') => app.toggle_all_caches(),
         KeyCode::Char('r') => {
-            app.task_status = Some(BackgroundTaskStatus::new(
+            *latest_cache_task_id += 1;
+            app.task_status = Some(progress_status(
                 "缓存扫描",
-                "重新发现缓存目标",
-                true,
+                "正在重新发现缓存路径".into(),
+                0,
+                SUPPORTED_CACHE_TARGETS.len(),
             ));
-            spawn_cache_scan(tx.clone());
+            spawn_cache_scan(tx.clone(), *latest_cache_task_id);
         }
         KeyCode::Char('d') => app.open_delete_confirmation(),
         _ => {}
@@ -287,7 +402,7 @@ fn handle_explorer_keys(
     app: &mut App,
     input_mode: &mut InputMode,
     tx: &Sender<WorkerMessage>,
-    latest_scan_task_id: &mut u64,
+    latest_directory_task_id: &mut u64,
     key: KeyEvent,
 ) -> Result<()> {
     match key.code {
@@ -310,15 +425,15 @@ fn handle_explorer_keys(
         }
         KeyCode::Char('r') => {
             if let Some(path) = app.current_path().cloned() {
-                *latest_scan_task_id += 1;
-                spawn_directory_scan(tx.clone(), *latest_scan_task_id, path, true);
+                *latest_directory_task_id += 1;
+                spawn_directory_scan(tx.clone(), *latest_directory_task_id, path, true);
             }
         }
         KeyCode::Backspace => {
             app.pop_directory();
             if let Some(path) = app.current_path().cloned() {
-                *latest_scan_task_id += 1;
-                spawn_directory_scan(tx.clone(), *latest_scan_task_id, path, false);
+                *latest_directory_task_id += 1;
+                spawn_directory_scan(tx.clone(), *latest_directory_task_id, path, false);
             }
         }
         KeyCode::Enter => {
@@ -327,8 +442,10 @@ fn handle_explorer_keys(
             {
                 let next = entry.path.clone();
                 app.push_directory(next.clone());
-                *latest_scan_task_id += 1;
-                spawn_directory_scan(tx.clone(), *latest_scan_task_id, next, false);
+                app.explorer_state_mut().set_entries(Vec::new());
+                app.status_message = format!("已进入 {}，正在枚举子目录", next.display());
+                *latest_directory_task_id += 1;
+                spawn_directory_scan(tx.clone(), *latest_directory_task_id, next, false);
             }
         }
         _ => {}
@@ -367,22 +484,68 @@ fn handle_filter_input(app: &mut App, input_mode: &mut InputMode, key: KeyEvent)
     Ok(false)
 }
 
-fn spawn_cache_scan(tx: Sender<WorkerMessage>) {
+fn spawn_cache_scan(tx: Sender<WorkerMessage>, task_id: u64) {
     thread::spawn(move || {
         let runner = SystemCommandRunner;
-        let result = (|| -> Result<Vec<CacheDiscovery>> {
-            let home = platform::home_dir()?;
-            let local = platform::local_app_data_dir()?;
-            discover_all_caches(&runner, home, local)
-        })();
-        match result {
-            Ok(items) => {
-                let _ = tx.send(WorkerMessage::CacheScanFinished(items));
-            }
+        let home = match platform::home_dir() {
+            Ok(path) => path,
             Err(error) => {
                 let _ = tx.send(WorkerMessage::TaskFailed(format!("缓存扫描失败: {error}")));
+                return;
             }
+        };
+        let local = match platform::local_app_data_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = tx.send(WorkerMessage::TaskFailed(format!("缓存扫描失败: {error}")));
+                return;
+            }
+        };
+
+        let total = SUPPORTED_CACHE_TARGETS.len();
+        let _ = tx.send(WorkerMessage::CacheDiscoveryStarted { task_id, total });
+
+        for (completed, (discovered, kind)) in SUPPORTED_CACHE_TARGETS
+            .iter()
+            .copied()
+            .enumerate()
+            .enumerate()
+        {
+            let item = match discover_cache_metadata(
+                kind,
+                &runner,
+                Some(home.clone()),
+                Some(local.clone()),
+            ) {
+                Ok(item) => item,
+                Err(error) => {
+                    let _ = tx.send(WorkerMessage::TaskFailed(format!("缓存扫描失败: {error}")));
+                    return;
+                }
+            };
+
+            let mut discovered_item = item.clone();
+            if discovered_item.available && discovered_item.size_state == CacheSizeState::Pending {
+                discovered_item.size_state = CacheSizeState::Scanning;
+            }
+            let _ = tx.send(WorkerMessage::CacheItemDiscovered {
+                task_id,
+                item: discovered_item,
+                discovered: discovered + 1,
+                total,
+            });
+
+            let mut sized_item = item;
+            let _ = populate_cache_size(&mut sized_item);
+            let _ = tx.send(WorkerMessage::CacheItemSized {
+                task_id,
+                item: sized_item,
+                completed: completed + 1,
+                total,
+            });
         }
+
+        let _ = tx.send(WorkerMessage::CacheScanFinished { task_id, total });
     });
 }
 
@@ -412,11 +575,10 @@ fn spawn_directory_scan(
             match load_directory_entries(&path, &cache) {
                 Ok((entries, true)) => {
                     let total = entries.len();
-                    let _ = tx.send(WorkerMessage::DirectoryScanProgress {
+                    let _ = tx.send(WorkerMessage::DirectoryEntriesDiscovered {
                         task_id,
                         path: path.clone(),
                         entries: entries.clone(),
-                        scanned: total,
                         total,
                         from_cache: true,
                     });
@@ -436,79 +598,70 @@ fn spawn_directory_scan(
             }
         }
 
-        let read_dir = match std::fs::read_dir(&path) {
-            Ok(read_dir) => read_dir,
+        let mut entries = match discover_directory_skeleton(&path) {
+            Ok(entries) => entries,
             Err(error) => {
                 let _ = tx.send(WorkerMessage::TaskFailed(format!(
-                    "无法读取目录 {}: {error}",
+                    "无法枚举目录 {}: {error}",
                     path.display()
                 )));
                 return;
             }
         };
 
-        let mut directories = Vec::new();
-        for entry in read_dir.flatten() {
-            if let Ok(metadata) = std::fs::symlink_metadata(entry.path())
-                && (metadata.is_dir() || metadata.file_type().is_symlink())
-            {
-                directories.push(entry.path());
-            }
-        }
+        let total = entries.len();
+        let _ = tx.send(WorkerMessage::DirectoryEntriesDiscovered {
+            task_id,
+            path: path.clone(),
+            entries: entries.clone(),
+            total,
+            from_cache: false,
+        });
 
-        let total = directories.len();
-        let mut built = Vec::new();
-        for (index, child_path) in directories.into_iter().enumerate() {
-            let name = child_path
-                .file_name()
-                .and_then(|item| item.to_str())
-                .unwrap_or("<未知>")
-                .to_string();
-            let entry = match std::fs::symlink_metadata(&child_path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    DirectoryEntryInfo::new_skipped(
-                        name,
-                        child_path.clone(),
-                        "符号链接或 junction 已跳过",
-                    )
+        for (index, entry) in entries.iter_mut().enumerate() {
+            if !entry.can_enter
+                || !matches!(entry.scan_state, ScanState::Pending | ScanState::Scanning)
+            {
+                continue;
+            }
+            entry.scan_state = ScanState::Scanning;
+            match compute_path_size(&entry.path) {
+                Ok(size) => {
+                    entry.size_bytes = size;
+                    entry.scan_state = ScanState::Ready;
                 }
-                Ok(_) => match compute_path_size(&child_path) {
-                    Ok(size) => DirectoryEntryInfo::new_ready(name, child_path.clone(), size, true),
-                    Err(error) => {
-                        DirectoryEntryInfo::new_error(name, child_path.clone(), error.to_string())
-                    }
-                },
                 Err(error) => {
-                    DirectoryEntryInfo::new_error(name, child_path.clone(), error.to_string())
+                    entry.size_bytes = 0;
+                    entry.scan_state = ScanState::Error;
+                    entry.message = Some(error.to_string());
                 }
-            };
-            built.push(entry);
-            built.sort_by(|left, right| {
-                right
-                    .size_bytes
-                    .cmp(&left.size_bytes)
-                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            });
-            let _ = tx.send(WorkerMessage::DirectoryScanProgress {
+            }
+            let _ = tx.send(WorkerMessage::DirectoryEntryUpdated {
                 task_id,
                 path: path.clone(),
-                entries: built.clone(),
-                scanned: index + 1,
+                entry: entry.clone(),
+                completed: index + 1,
                 total,
                 from_cache: false,
             });
         }
 
+        entries.sort_by(|left, right| {
+            right
+                .size_bytes
+                .cmp(&left.size_bytes)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
         let snapshot = CacheSnapshot {
             path: path.clone(),
             captured_at: chrono::Utc::now(),
-            entries: built.clone(),
+            entries: entries.clone(),
         };
         let _ = cache.save_snapshot(&snapshot);
         let _ = tx.send(WorkerMessage::DirectoryScanFinished {
             task_id,
             path,
-            entries: built,
+            entries,
             from_cache: false,
         });
     });
@@ -520,6 +673,26 @@ fn spawn_cleanup(tx: Sender<WorkerMessage>, items: Vec<CacheDiscovery>) {
         let results = execute_cleanup(&items, &runner);
         let _ = tx.send(WorkerMessage::CleanupFinished(results));
     });
+}
+
+fn progress_status(
+    title: &str,
+    message: String,
+    current: usize,
+    total: usize,
+) -> BackgroundTaskStatus {
+    let mut status = BackgroundTaskStatus::new(title, message, true);
+    status.progress_current = current;
+    status.progress_total = total;
+    status
+}
+
+fn upsert_directory_entry(entries: &mut Vec<DirectoryEntryInfo>, updated: DirectoryEntryInfo) {
+    if let Some(existing) = entries.iter_mut().find(|entry| entry.path == updated.path) {
+        *existing = updated;
+    } else {
+        entries.push(updated);
+    }
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {

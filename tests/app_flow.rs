@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use sysclean::app::{ActiveDialog, App, Page};
-use sysclean::cache_cleaner::{CacheDiscovery, CacheTargetKind};
+use sysclean::cache_cleaner::{CacheDiscovery, CacheSizeState, CacheTargetKind};
+use sysclean::models::{DirectoryEntryInfo, ScanState};
 
 #[test]
 fn app_switches_between_workspace_pages() {
@@ -38,11 +39,14 @@ fn app_toggle_cache_selection_marks_current_item() {
 #[test]
 fn app_delete_requires_selected_cache_items() {
     let mut app = App::default();
-    app.set_cache_items(vec![CacheDiscovery::new(
+    let mut cache = CacheDiscovery::new(
         CacheTargetKind::Npm,
         "npm".into(),
         vec![PathBuf::from("npm")],
-    )]);
+    );
+    cache.size_state = CacheSizeState::Ready;
+    cache.reclaimable_bytes = Some(128);
+    app.set_cache_items(vec![cache]);
 
     app.open_delete_confirmation();
     assert_eq!(app.active_dialog(), ActiveDialog::None);
@@ -50,6 +54,24 @@ fn app_delete_requires_selected_cache_items() {
     app.toggle_selected_cache();
     app.open_delete_confirmation();
     assert_eq!(app.active_dialog(), ActiveDialog::DeleteConfirmation);
+}
+
+#[test]
+fn app_delete_confirmation_waits_for_selected_cache_size_to_finish() {
+    let mut app = App::default();
+    let mut npm = CacheDiscovery::new(
+        CacheTargetKind::Npm,
+        "npm".into(),
+        vec![PathBuf::from("npm")],
+    );
+    npm.size_state = CacheSizeState::Scanning;
+    app.set_cache_items(vec![npm]);
+
+    app.toggle_selected_cache();
+    app.open_delete_confirmation();
+
+    assert_eq!(app.active_dialog(), ActiveDialog::None);
+    assert!(app.status_message.contains("大小计算完成"));
 }
 
 #[test]
@@ -67,5 +89,76 @@ fn app_directory_navigation_tracks_current_path() {
     assert_eq!(
         app.current_path().expect("current path"),
         &PathBuf::from(r"C:\Users\demo")
+    );
+}
+
+#[test]
+fn app_directory_navigation_can_show_skeleton_entries_before_sizes_are_ready() {
+    let mut app = App::default();
+    app.set_current_path(PathBuf::from(r"C:\Users\demo"));
+    app.push_directory(PathBuf::from(r"C:\Users\demo\Projects"));
+    app.explorer_state_mut().set_entries(vec![
+        DirectoryEntryInfo {
+            name: "alpha".into(),
+            path: PathBuf::from(r"C:\Users\demo\Projects\alpha"),
+            size_bytes: 0,
+            can_enter: true,
+            scan_state: ScanState::Pending,
+            message: None,
+        },
+        DirectoryEntryInfo {
+            name: "beta".into(),
+            path: PathBuf::from(r"C:\Users\demo\Projects\beta"),
+            size_bytes: 0,
+            can_enter: true,
+            scan_state: ScanState::Scanning,
+            message: None,
+        },
+    ]);
+
+    let visible: Vec<(String, ScanState)> = app
+        .explorer_state()
+        .visible_entries()
+        .iter()
+        .map(|item| (item.name.clone(), item.scan_state))
+        .collect();
+
+    assert_eq!(
+        visible,
+        vec![
+            ("alpha".to_string(), ScanState::Pending),
+            ("beta".to_string(), ScanState::Scanning),
+        ]
+    );
+}
+
+#[test]
+fn app_cache_upsert_preserves_selection_and_checked_state() {
+    let mut app = App::default();
+    let mut npm = CacheDiscovery::new(
+        CacheTargetKind::Npm,
+        "npm".into(),
+        vec![PathBuf::from("npm")],
+    );
+    npm.size_state = CacheSizeState::Pending;
+    app.set_cache_items(vec![npm]);
+
+    app.toggle_selected_cache();
+
+    let mut updated = CacheDiscovery::new(
+        CacheTargetKind::Npm,
+        "npm".into(),
+        vec![PathBuf::from("npm")],
+    );
+    updated.size_state = CacheSizeState::Ready;
+    updated.reclaimable_bytes = Some(256);
+    updated.total_bytes = 256;
+    app.upsert_cache_item(updated);
+
+    assert_eq!(app.selected_cache().expect("selected").label, "npm");
+    assert!(app.selected_cache().expect("selected").selected);
+    assert_eq!(
+        app.selected_cache().expect("selected").size_state,
+        CacheSizeState::Ready
     );
 }

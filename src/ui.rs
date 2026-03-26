@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::{ActiveDialog, App, Page};
-use crate::cache_cleaner::{CacheDiscovery, CleanupOutcome};
+use crate::cache_cleaner::{CacheDiscovery, CacheSizeState, CleanupOutcome};
 use crate::models::{DirectoryEntryInfo, ScanState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,17 +113,9 @@ fn render_cache_page(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_cache_table(frame: &mut Frame, area: Rect, items: &[CacheDiscovery], selected: usize) {
     let rows = items.iter().map(|item| {
-        let reclaimable = format_size(item.reclaimable_bytes.unwrap_or(item.total_bytes));
-        let total = format_size(item.total_bytes);
-        let status = if !item.available {
-            "不可用".to_string()
-        } else if item.paths.is_empty() {
-            "命令型目标".to_string()
-        } else if item.total_bytes == 0 {
-            "已检查 0B".to_string()
-        } else {
-            "可清理".to_string()
-        };
+        let reclaimable = format_cache_size(item.reclaimable_bytes, item.size_state);
+        let total = format_cache_size(Some(item.total_bytes), item.size_state);
+        let status = cache_status_label(item);
         let label = if item.selected {
             format!("[x] {}", item.label)
         } else {
@@ -172,15 +164,12 @@ fn render_cache_details(frame: &mut Frame, area: Rect, selected: Option<&CacheDi
                 .join("\n")
         };
         format!(
-            "名称: {}\n说明: {}\n状态: {}\n可释放: {}\n备注: {}\n\n路径:\n{}",
+            "名称: {}\n说明: {}\n状态: {}\n路径数: {}\n可释放: {}\n备注: {}\n\n路径:\n{}",
             item.label,
             item.description,
-            if item.available {
-                "可用"
-            } else {
-                "不可用"
-            },
-            format_size(item.reclaimable_bytes.unwrap_or(item.total_bytes)),
+            cache_status_label(item),
+            item.paths.len(),
+            format_cache_size(item.reclaimable_bytes, item.size_state),
             item.note.as_deref().unwrap_or("无"),
             paths
         )
@@ -252,7 +241,7 @@ fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    format!("{:>10}", format_size(entry.size_bytes)),
+                    format!("{:>10}", format_directory_size(entry)),
                     Style::default().fg(Color::Rgb(129, 214, 219)),
                 ),
                 Span::raw(" "),
@@ -328,7 +317,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode
 fn render_help_dialog(frame: &mut Frame, area: Rect) {
     let popup = centered_rect(70, 70, area);
     frame.render_widget(Clear, popup);
-    let text = "全局快捷键\nTab / ←→ 切换工作区\nq 退出\n? 打开帮助\nEsc 关闭弹窗或取消输入\n\n缓存清理\n↑↓ 选择缓存\nSpace 勾选\nA 全选或反选\nR 重扫缓存\nD 打开删除确认\n\n目录分析\n↑↓ 选择目录\nEnter 进入目录\nBackspace 返回上级\nHome / End 跳到首尾\nPgUp / PgDn 快速翻页\n/ 进入过滤\nO 打开资源管理器";
+    let text = "全局快捷键\nTab / ←→ 切换工作区\nq 退出\n? 打开帮助\nEsc 关闭弹窗或取消输入\n\n缓存清理\n↑↓ 选择缓存\nSpace 勾选\nA 全选或反选\nR 重扫缓存\nD 打开删除确认\n路径会先显示，大小会后台逐项更新\n\n目录分析\n↑↓ 选择目录\nEnter 进入目录\nBackspace 返回上级\nHome / End 跳到首尾\nPgUp / PgDn 快速翻页\n/ 进入过滤\nO 打开资源管理器\n进入目录后会先展示骨架，再边扫边重排";
     let widget = Paragraph::new(text)
         .block(
             Block::default()
@@ -351,7 +340,7 @@ fn render_delete_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 format!(
                     "• {} ({})",
                     item.label,
-                    format_size(item.reclaimable_bytes.unwrap_or(item.total_bytes))
+                    format_cache_size(item.reclaimable_bytes, item.size_state)
                 )
             })
             .collect::<Vec<_>>()
@@ -449,6 +438,42 @@ pub fn format_size(bytes: u64) -> String {
         format!("{bytes} {}", units[unit_index])
     } else {
         format!("{value:.1} {}", units[unit_index])
+    }
+}
+
+fn format_cache_size(bytes: Option<u64>, state: CacheSizeState) -> String {
+    match state {
+        CacheSizeState::Pending => "待计算".into(),
+        CacheSizeState::Scanning => "计算中".into(),
+        CacheSizeState::Unavailable => "不可用".into(),
+        CacheSizeState::Error => "失败".into(),
+        CacheSizeState::Ready => format_size(bytes.unwrap_or_default()),
+    }
+}
+
+fn format_directory_size(entry: &DirectoryEntryInfo) -> String {
+    match entry.scan_state {
+        ScanState::Pending => "待计算".into(),
+        ScanState::Scanning => "计算中".into(),
+        _ => format_size(entry.size_bytes),
+    }
+}
+
+fn cache_status_label(item: &CacheDiscovery) -> String {
+    match item.size_state {
+        CacheSizeState::Pending => "待计算".into(),
+        CacheSizeState::Scanning => "计算中".into(),
+        CacheSizeState::Ready => {
+            if item.paths.is_empty() {
+                "命令型目标".into()
+            } else if item.total_bytes == 0 {
+                "已检查 0B".into()
+            } else {
+                "可清理".into()
+            }
+        }
+        CacheSizeState::Unavailable => "不可用".into(),
+        CacheSizeState::Error => "失败".into(),
     }
 }
 

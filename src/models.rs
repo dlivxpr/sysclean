@@ -24,6 +24,21 @@ pub struct DirectoryEntryInfo {
 }
 
 impl DirectoryEntryInfo {
+    pub fn new_pending(name: String, path: PathBuf, can_enter: bool) -> Self {
+        Self {
+            name,
+            path,
+            size_bytes: 0,
+            can_enter,
+            scan_state: ScanState::Pending,
+            message: None,
+        }
+    }
+
+    pub fn mark_scanning(&mut self) {
+        self.scan_state = ScanState::Scanning;
+    }
+
     pub fn new_ready(name: String, path: PathBuf, size_bytes: u64, can_enter: bool) -> Self {
         Self {
             name,
