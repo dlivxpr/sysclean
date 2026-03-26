@@ -74,7 +74,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         .divider(Span::raw(" "))
         .block(
             Block::default()
-                .title(" SysClean ")
+                .title(format!(" SysClean v{} ", env!("CARGO_PKG_VERSION")))
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         );

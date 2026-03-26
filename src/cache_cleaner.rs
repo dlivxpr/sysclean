@@ -53,6 +53,18 @@ impl CacheTargetKind {
             Self::Cargo => "Cargo registry 与 git 缓存",
         }
     }
+
+    /// Returns the official CLI cleanup command for this tool, if available.
+    /// Tools with `Some` use CLI-based cleanup; `None` falls back to manual file deletion.
+    pub fn cleanup_command(self) -> Option<(&'static str, &'static [&'static str])> {
+        match self {
+            Self::Uv => Some(("uv", &["cache", "clean"])),
+            Self::Npm => Some(("npm", &["cache", "clean", "--force"])),
+            Self::Pnpm => Some(("pnpm", &["store", "prune"])),
+            Self::Docker => Some(("docker", &["builder", "prune", "-a", "-f"])),
+            Self::Cargo => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +159,11 @@ impl CacheDiscovery {
     }
 
     pub fn cleanup_path_count(&self) -> usize {
-        self.path_estimates.len().max(1)
+        if self.kind.cleanup_command().is_some() {
+            1
+        } else {
+            self.path_estimates.len().max(1)
+        }
     }
 
     pub fn cleanup_estimated_bytes(&self) -> u64 {
@@ -448,10 +464,12 @@ fn execute_single_cleanup(
     completed_bytes: &mut u64,
     on_progress: &mut impl FnMut(CleanupProgress),
 ) -> CleanupOutcome {
-    if item.kind == CacheTargetKind::Docker {
-        let bytes_reclaimed = item.reclaimable_bytes.unwrap_or_default();
-        let result = runner.run("docker", &["builder", "prune", "-a", "-f"]);
+    // CLI-based cleanup: uv, npm, pnpm, docker all use their official cleanup commands
+    if let Some((program, args)) = item.kind.cleanup_command() {
+        let estimated = item.cleanup_estimated_bytes();
+        let result = runner.run(program, args);
         *completed_paths += 1;
+        *completed_bytes += estimated;
         on_progress(CleanupProgress {
             current_label: item.label.clone(),
             completed_bytes: *completed_bytes,
@@ -461,7 +479,7 @@ fn execute_single_cleanup(
         });
         return CleanupOutcome {
             label: item.label.clone(),
-            bytes_reclaimed: if result.is_ok() { bytes_reclaimed } else { 0 },
+            bytes_reclaimed: if result.is_ok() { estimated } else { 0 },
             skipped: result
                 .err()
                 .map(|err| vec![err.to_string()])
@@ -469,6 +487,7 @@ fn execute_single_cleanup(
         };
     }
 
+    // Manual file deletion fallback (cargo)
     let mut reclaimed = 0;
     let mut skipped = Vec::new();
     for estimate in &item.path_estimates {
