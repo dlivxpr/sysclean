@@ -89,6 +89,14 @@ pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
+        #[cfg(target_os = "windows")]
+        let output = Command::new("cmd")
+            .arg("/C")
+            .arg(program)
+            .args(args.iter().map(OsStr::new))
+            .output()
+            .with_context(|| format!("failed to run {program}"))?;
+        #[cfg(not(target_os = "windows"))]
         let output = Command::new(program)
             .args(args.iter().map(OsStr::new))
             .output()
@@ -255,19 +263,35 @@ pub fn discover_cache_metadata(
                 .into_iter()
                 .collect::<Vec<_>>();
             if discovery.paths.is_empty() {
-                if let Some(base) = local_app_data.as_ref() {
-                    discovery
-                        .paths
-                        .push(base.join("pnpm").join("store").join("v3"));
+                // 命令失败时，扫描 pnpm/store/ 目录下实际存在的版本子目录
+                let store_bases: Vec<PathBuf> = [
+                    local_app_data
+                        .as_ref()
+                        .map(|b| b.join("pnpm").join("store")),
+                    user_profile
+                        .as_ref()
+                        .map(|h| h.join("AppData").join("Local").join("pnpm").join("store")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+
+                for store_base in &store_bases {
+                    if let Ok(entries) = fs::read_dir(store_base) {
+                        for entry in entries.flatten() {
+                            let p = entry.path();
+                            if p.is_dir() {
+                                discovery.paths.push(p);
+                            }
+                        }
+                    }
                 }
-                if let Some(home) = user_profile.as_ref() {
-                    discovery.paths.push(
-                        home.join("AppData")
-                            .join("Local")
-                            .join("pnpm")
-                            .join("store")
-                            .join("v3"),
-                    );
+
+                // 若扫描也无结果，保留 v3 作为最后兜底
+                if discovery.paths.is_empty() {
+                    for store_base in &store_bases {
+                        discovery.paths.push(store_base.join("v3"));
+                    }
                 }
             }
         }
