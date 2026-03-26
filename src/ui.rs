@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs, Wrap,
+    Block, Borders, Cell, Clear, LineGauge, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 
 use crate::app::{ActiveDialog, App, Page};
@@ -29,7 +29,7 @@ pub fn render(
         .constraints([
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(2),
+            Constraint::Length(4),
         ])
         .split(area);
 
@@ -223,7 +223,7 @@ fn render_explorer_page(frame: &mut Frame, area: Rect, app: &App, input_mode: In
 
 fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
     let visible = app.explorer_state().visible_entries();
-    let items = visible
+    let rows = visible
         .iter()
         .map(|entry| {
             let status = match entry.scan_state {
@@ -234,35 +234,43 @@ fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
                 ScanState::Skipped => "跳过",
                 ScanState::Error => "失败",
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{:<24}", truncate(&entry.name, 24)),
-                    Style::default().fg(Color::Rgb(224, 241, 244)),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{:>10}", format_directory_size(entry)),
-                    Style::default().fg(Color::Rgb(129, 214, 219)),
-                ),
-                Span::raw(" "),
-                Span::styled(status, Style::default().fg(Color::Gray)),
-            ]))
+            Row::new(vec![
+                Cell::from(entry.name.clone())
+                    .style(Style::default().fg(Color::Rgb(224, 241, 244))),
+                Cell::from(format!("{:>10}", format_directory_size(entry)))
+                    .style(Style::default().fg(Color::Rgb(129, 214, 219))),
+                Cell::from(format!("{status:<6}")).style(Style::default().fg(Color::Gray)),
+            ])
         })
         .collect::<Vec<_>>();
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" 目录分析 ")
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED),
-        )
-        .highlight_style(Style::default().bg(Color::Rgb(25, 55, 74)))
-        .highlight_symbol("▶ ");
-    let mut state = ListState::default();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Fill(1),
+            Constraint::Length(12),
+            Constraint::Length(8),
+        ],
+    )
+    .header(
+        Row::new(vec!["目录", "大小", "状态"]).style(
+            Style::default()
+                .fg(Color::Rgb(129, 214, 219))
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
+        Block::default()
+            .title(" 目录分析 ")
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(25, 55, 74)))
+    .column_spacing(1);
+    let mut state = TableState::default();
     if !visible.is_empty() {
         state.select(Some(app.explorer_state().selected_index()));
     }
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_explorer_details(frame: &mut Frame, area: Rect, entry: Option<&DirectoryEntryInfo>) {
@@ -291,7 +299,12 @@ fn render_explorer_details(frame: &mut Frame, area: Rect, entry: Option<&Directo
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode) {
-    let text = if input_mode == InputMode::Filtering {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Length(2)])
+        .split(area);
+
+    let shortcuts = if input_mode == InputMode::Filtering {
         "过滤模式: 输入关键字, Enter 应用, Esc 取消"
     } else {
         match app.page() {
@@ -303,15 +316,62 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode
             }
         }
     };
-    let widget = Paragraph::new(text)
+    let shortcuts_widget = Paragraph::new(shortcuts)
         .style(Style::default().fg(Color::Rgb(205, 227, 230)))
         .alignment(Alignment::Center)
         .block(
             Block::default()
+                .title(" 快捷键 ")
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         );
-    frame.render_widget(widget, area);
+    frame.render_widget(shortcuts_widget, sections[0]);
+
+    if let Some(task) = app.task_status.as_ref() {
+        if let Some(ratio) = task.progress_ratio() {
+            let label = task
+                .progress_label_text()
+                .unwrap_or_else(|| task.message.clone());
+            let widget = LineGauge::default()
+                .ratio(ratio)
+                .label(label)
+                .filled_style(Style::default().fg(Color::Rgb(129, 214, 219)))
+                .unfilled_style(Style::default().fg(Color::Rgb(75, 93, 111)))
+                .block(
+                    Block::default()
+                        .title(format!(" 任务 · {} ", task.title))
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED),
+                );
+            frame.render_widget(widget, sections[1]);
+            return;
+        }
+
+        let text = task
+            .progress_label_text()
+            .unwrap_or_else(|| format!("{} · {}", task.title, task.message));
+        let widget = Paragraph::new(text)
+            .style(Style::default().fg(Color::Rgb(219, 240, 243)))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(format!(" 任务 · {} ", task.title))
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED),
+            );
+        frame.render_widget(widget, sections[1]);
+    } else {
+        let widget = Paragraph::new(app.status_message.clone())
+            .style(Style::default().fg(Color::Rgb(219, 240, 243)))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(" 状态 ")
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED),
+            );
+        frame.render_widget(widget, sections[1]);
+    }
 }
 
 fn render_help_dialog(frame: &mut Frame, area: Rect) {
@@ -475,15 +535,4 @@ fn cache_status_label(item: &CacheDiscovery) -> String {
         CacheSizeState::Unavailable => "不可用".into(),
         CacheSizeState::Error => "失败".into(),
     }
-}
-
-fn truncate(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    let kept = value
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>();
-    format!("{kept}...")
 }

@@ -56,12 +56,11 @@ impl ExplorerListState {
         self.clamp_selection();
     }
 
-    pub fn visible_entries(&self) -> Vec<DirectoryEntryInfo> {
+    pub fn visible_entries(&self) -> Vec<&DirectoryEntryInfo> {
         let filter = self.filter.to_lowercase();
         self.entries
             .iter()
             .filter(|item| filter.is_empty() || item.name.to_lowercase().contains(&filter))
-            .cloned()
             .collect()
     }
 

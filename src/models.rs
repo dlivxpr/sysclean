@@ -92,6 +92,10 @@ pub struct BackgroundTaskStatus {
     pub completed_at: Option<DateTime<Utc>>,
     pub progress_current: usize,
     pub progress_total: usize,
+    pub progress_label: Option<String>,
+    pub bytes_current: Option<u64>,
+    pub bytes_total: Option<u64>,
+    pub determinate: bool,
     pub cancellable: bool,
 }
 
@@ -104,7 +108,32 @@ impl BackgroundTaskStatus {
             completed_at: None,
             progress_current: 0,
             progress_total: 0,
+            progress_label: None,
+            bytes_current: None,
+            bytes_total: None,
+            determinate: false,
             cancellable,
         }
+    }
+
+    pub fn progress_ratio(&self) -> Option<f64> {
+        if !self.determinate {
+            return None;
+        }
+        if let (Some(current), Some(total)) = (self.bytes_current, self.bytes_total)
+            && total > 0
+        {
+            return Some((current as f64 / total as f64).clamp(0.0, 1.0));
+        }
+        if self.progress_total > 0 {
+            return Some(
+                (self.progress_current as f64 / self.progress_total as f64).clamp(0.0, 1.0),
+            );
+        }
+        None
+    }
+
+    pub fn progress_label_text(&self) -> Option<String> {
+        self.progress_label.clone()
     }
 }

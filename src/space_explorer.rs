@@ -1,12 +1,30 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::cache_cleaner::compute_path_size;
 use crate::models::DirectoryEntryInfo;
 use crate::persistence::{CacheSnapshot, ScanCache};
+
+const MAX_SCAN_WORKERS: usize = 6;
+const MIN_SCAN_WORKERS: usize = 2;
+pub const DIRECTORY_UPDATE_BATCH_SIZE: usize = 4;
+pub const DIRECTORY_UPDATE_THROTTLE: Duration = Duration::from_millis(125);
+
+pub fn recommended_worker_count(job_count: usize) -> usize {
+    if job_count <= 1 {
+        return 1;
+    }
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(MIN_SCAN_WORKERS);
+    available
+        .clamp(MIN_SCAN_WORKERS, MAX_SCAN_WORKERS)
+        .min(job_count)
+}
 
 pub fn discover_directory_skeleton(path: &Path) -> Result<Vec<DirectoryEntryInfo>> {
     let mut items = Vec::new();
@@ -58,7 +76,7 @@ pub fn load_directory_entries(
     cache: &ScanCache,
 ) -> Result<(Vec<DirectoryEntryInfo>, bool)> {
     if let Some(snapshot) = cache.load_snapshot(path)?
-        && snapshot.is_fresh(Duration::hours(24))
+        && snapshot.is_fresh(ChronoDuration::hours(24))
     {
         let entries = snapshot
             .entries

@@ -91,11 +91,27 @@ impl CommandRunner for SystemCommandRunner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachePathEstimate {
+    pub path: PathBuf,
+    pub estimated_bytes: Option<u64>,
+}
+
+impl CachePathEstimate {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            estimated_bytes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheDiscovery {
     pub kind: CacheTargetKind,
     pub label: String,
     pub description: String,
     pub paths: Vec<PathBuf>,
+    pub path_estimates: Vec<CachePathEstimate>,
     pub available: bool,
     pub size_state: CacheSizeState,
     pub reclaimable_bytes: Option<u64>,
@@ -110,6 +126,7 @@ impl CacheDiscovery {
             kind,
             label,
             description: kind.description().to_string(),
+            path_estimates: paths.iter().cloned().map(CachePathEstimate::new).collect(),
             paths,
             available: true,
             size_state: CacheSizeState::Pending,
@@ -118,6 +135,38 @@ impl CacheDiscovery {
             selected: false,
             note: None,
         }
+    }
+
+    fn sync_path_estimates(&mut self) {
+        self.path_estimates = self
+            .paths
+            .iter()
+            .cloned()
+            .map(CachePathEstimate::new)
+            .collect();
+    }
+
+    pub fn cleanup_path_count(&self) -> usize {
+        self.path_estimates.len().max(1)
+    }
+
+    pub fn cleanup_estimated_bytes(&self) -> u64 {
+        if self.path_estimates.is_empty() {
+            self.reclaimable_bytes.unwrap_or(self.total_bytes)
+        } else {
+            self.path_estimates
+                .iter()
+                .map(|estimate| estimate.estimated_bytes.unwrap_or_default())
+                .sum()
+        }
+    }
+
+    pub fn has_precise_progress_estimates(&self) -> bool {
+        !self.path_estimates.is_empty()
+            && self
+                .path_estimates
+                .iter()
+                .all(|estimate| estimate.estimated_bytes.is_some())
     }
 }
 
@@ -132,6 +181,15 @@ pub struct CleanupOutcome {
     pub label: String,
     pub bytes_reclaimed: u64,
     pub skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupProgress {
+    pub current_label: String,
+    pub completed_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub completed_paths: usize,
+    pub total_paths: usize,
 }
 
 pub fn discover_cache_target(
@@ -226,6 +284,7 @@ pub fn discover_cache_metadata(
     if kind != CacheTargetKind::Docker {
         discovery.paths.sort();
         discovery.paths.dedup();
+        discovery.sync_path_estimates();
         discovery.available =
             discovery.paths.iter().any(|path| path.exists()) || !discovery.paths.is_empty();
         if discovery.paths.is_empty() {
@@ -245,6 +304,7 @@ pub fn populate_cache_size(item: &mut CacheDiscovery) -> Result<()> {
         item.size_state = CacheSizeState::Unavailable;
         item.reclaimable_bytes = None;
         item.total_bytes = 0;
+        item.sync_path_estimates();
         return Ok(());
     }
 
@@ -257,15 +317,23 @@ pub fn populate_cache_size(item: &mut CacheDiscovery) -> Result<()> {
         return Ok(());
     }
 
+    if item.path_estimates.len() != item.paths.len() {
+        item.sync_path_estimates();
+    }
+
     item.size_state = CacheSizeState::Scanning;
     let mut total_bytes = 0_u64;
     let mut had_error = false;
-    for path in &item.paths {
-        match compute_path_size(path) {
-            Ok(size) => total_bytes += size,
+    for estimate in &mut item.path_estimates {
+        match compute_path_size(&estimate.path) {
+            Ok(size) => {
+                estimate.estimated_bytes = Some(size);
+                total_bytes += size;
+            }
             Err(error) => {
                 had_error = true;
-                item.note = Some(format!("{} 统计失败: {error}", path.display()));
+                estimate.estimated_bytes = None;
+                item.note = Some(format!("{} 统计失败: {error}", estimate.path.display()));
             }
         }
     }
@@ -323,17 +391,74 @@ pub fn execute_cleanup(
     items: &[CacheDiscovery],
     runner: &impl CommandRunner,
 ) -> Vec<CleanupOutcome> {
-    items
+    execute_cleanup_with_progress(items, runner, |_| {})
+}
+
+pub fn execute_cleanup_with_progress(
+    items: &[CacheDiscovery],
+    runner: &impl CommandRunner,
+    mut on_progress: impl FnMut(CleanupProgress),
+) -> Vec<CleanupOutcome> {
+    let selected = items
         .iter()
         .filter(|item| item.selected)
-        .map(|item| execute_single_cleanup(item, runner))
+        .collect::<Vec<_>>();
+    let total_paths = selected
+        .iter()
+        .map(|item| item.cleanup_path_count())
+        .sum::<usize>();
+    let total_bytes = if selected
+        .iter()
+        .all(|item| item.has_precise_progress_estimates())
+    {
+        Some(
+            selected
+                .iter()
+                .map(|item| item.cleanup_estimated_bytes())
+                .sum(),
+        )
+    } else {
+        None
+    };
+    let mut completed_paths = 0_usize;
+    let mut completed_bytes = 0_u64;
+
+    selected
+        .into_iter()
+        .map(|item| {
+            execute_single_cleanup(
+                item,
+                runner,
+                total_paths,
+                total_bytes,
+                &mut completed_paths,
+                &mut completed_bytes,
+                &mut on_progress,
+            )
+        })
         .collect()
 }
 
-fn execute_single_cleanup(item: &CacheDiscovery, runner: &impl CommandRunner) -> CleanupOutcome {
+fn execute_single_cleanup(
+    item: &CacheDiscovery,
+    runner: &impl CommandRunner,
+    total_paths: usize,
+    total_bytes: Option<u64>,
+    completed_paths: &mut usize,
+    completed_bytes: &mut u64,
+    on_progress: &mut impl FnMut(CleanupProgress),
+) -> CleanupOutcome {
     if item.kind == CacheTargetKind::Docker {
         let bytes_reclaimed = item.reclaimable_bytes.unwrap_or_default();
         let result = runner.run("docker", &["builder", "prune", "-a", "-f"]);
+        *completed_paths += 1;
+        on_progress(CleanupProgress {
+            current_label: item.label.clone(),
+            completed_bytes: *completed_bytes,
+            total_bytes,
+            completed_paths: *completed_paths,
+            total_paths,
+        });
         return CleanupOutcome {
             label: item.label.clone(),
             bytes_reclaimed: if result.is_ok() { bytes_reclaimed } else { 0 },
@@ -346,18 +471,36 @@ fn execute_single_cleanup(item: &CacheDiscovery, runner: &impl CommandRunner) ->
 
     let mut reclaimed = 0;
     let mut skipped = Vec::new();
-    for path in &item.paths {
-        if !path.exists() {
-            skipped.push(format!("{} 不存在", path.display()));
+    for estimate in &item.path_estimates {
+        if !estimate.path.exists() {
+            skipped.push(format!("{} 不存在", estimate.path.display()));
+            *completed_paths += 1;
+            *completed_bytes += estimate.estimated_bytes.unwrap_or_default();
+            on_progress(CleanupProgress {
+                current_label: item.label.clone(),
+                completed_bytes: *completed_bytes,
+                total_bytes,
+                completed_paths: *completed_paths,
+                total_paths,
+            });
             continue;
         }
-        match compute_path_size(path) {
+        match compute_path_size(&estimate.path) {
             Ok(size) => reclaimed += size,
-            Err(error) => skipped.push(format!("{} 统计失败: {error}", path.display())),
+            Err(error) => skipped.push(format!("{} 统计失败: {error}", estimate.path.display())),
         }
-        if let Err(error) = remove_path_contents(path) {
-            skipped.push(format!("{} 删除失败: {error}", path.display()));
+        if let Err(error) = remove_path_contents(&estimate.path) {
+            skipped.push(format!("{} 删除失败: {error}", estimate.path.display()));
         }
+        *completed_paths += 1;
+        *completed_bytes += estimate.estimated_bytes.unwrap_or_default();
+        on_progress(CleanupProgress {
+            current_label: item.label.clone(),
+            completed_bytes: *completed_bytes,
+            total_bytes,
+            completed_paths: *completed_paths,
+            total_paths,
+        });
     }
     CleanupOutcome {
         label: item.label.clone(),
