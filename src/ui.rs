@@ -9,7 +9,7 @@ use ratatui::widgets::{
 
 use crate::app::{ActiveDialog, App, Page};
 use crate::cache_cleaner::{CacheDiscovery, CacheSizeState, CleanupOutcome};
-use crate::models::{DirectoryEntryInfo, ScanState};
+use crate::models::{BackgroundTaskStatus, DirectoryEntryInfo, ScanState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -27,9 +27,9 @@ pub fn render(
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(10),
-            Constraint::Length(4),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -80,21 +80,50 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         );
     frame.render_widget(tabs, parts[0]);
 
-    let status = app
-        .task_status
+    let status_block = Block::default()
+        .title(" 状态 ")
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED);
+    let inner = status_block.inner(parts[1]);
+    frame.render_widget(status_block, parts[1]);
+
+    let task_width = if app.task_status.is_some() {
+        match inner.width {
+            0..=35 => None,
+            36..=47 => Some(22),
+            _ => Some(30),
+        }
+    } else {
+        None
+    };
+
+    let columns = if let Some(width) = task_width {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(10), Constraint::Length(width)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(10)])
+            .split(inner)
+    };
+
+    let status_widget = Paragraph::new(header_status_text(app))
+        .style(Style::default().fg(Color::Rgb(219, 240, 243)))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(status_widget, columns[0]);
+
+    if let (Some(task), Some(_)) = (app.task_status.as_ref(), task_width) {
+        render_task_card(frame, columns[1], task);
+    }
+}
+
+fn header_status_text(app: &App) -> String {
+    app.task_status
         .as_ref()
         .map(|task| format!("{} · {}", task.title, task.message))
-        .unwrap_or_else(|| app.status_message.clone());
-    let status_widget = Paragraph::new(status)
-        .style(Style::default().fg(Color::Rgb(219, 240, 243)))
-        .block(
-            Block::default()
-                .title(" 状态 ")
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED),
-        )
-        .wrap(Wrap { trim: true });
-    frame.render_widget(status_widget, parts[1]);
+        .unwrap_or_else(|| app.status_message.clone())
 }
 
 fn render_cache_page(frame: &mut Frame, area: Rect, app: &App) {
@@ -299,79 +328,87 @@ fn render_explorer_details(frame: &mut Frame, area: Rect, entry: Option<&Directo
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(2)])
-        .split(area);
-
-    let shortcuts = if input_mode == InputMode::Filtering {
-        "过滤模式: 输入关键字, Enter 应用, Esc 取消"
-    } else {
-        match app.page() {
-            Page::CacheCleanup => {
-                "Tab 切页  ↑↓ 选择  Space 勾选  a 全选  r 重扫  d 删除  ? 帮助  q 退出"
-            }
-            Page::SpaceExplorer => {
-                "Tab 切页  ↑↓ 选择  Enter 进入  Backspace 返回  Home/End 首尾  PgUp/PgDn 翻页  / 过滤  o 打开目录  r 重扫  ? 帮助  q 退出"
-            }
-        }
-    };
-    let shortcuts_widget = Paragraph::new(shortcuts)
+    let shortcuts_widget = Paragraph::new(footer_shortcuts(app, input_mode))
         .style(Style::default().fg(Color::Rgb(205, 227, 230)))
         .alignment(Alignment::Center)
         .block(
             Block::default()
-                .title(" 快捷键 ")
+                .title(" 常用快捷键 ")
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
-        );
-    frame.render_widget(shortcuts_widget, sections[0]);
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(shortcuts_widget, area);
+}
 
-    if let Some(task) = app.task_status.as_ref() {
-        if let Some(ratio) = task.progress_ratio() {
-            let label = task
-                .progress_label_text()
-                .unwrap_or_else(|| task.message.clone());
-            let widget = LineGauge::default()
-                .ratio(ratio)
-                .label(label)
-                .filled_style(Style::default().fg(Color::Rgb(129, 214, 219)))
-                .unfilled_style(Style::default().fg(Color::Rgb(75, 93, 111)))
-                .block(
-                    Block::default()
-                        .title(format!(" 任务 · {} ", task.title))
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED),
-                );
-            frame.render_widget(widget, sections[1]);
-            return;
-        }
-
-        let text = task
-            .progress_label_text()
-            .unwrap_or_else(|| format!("{} · {}", task.title, task.message));
-        let widget = Paragraph::new(text)
-            .style(Style::default().fg(Color::Rgb(219, 240, 243)))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .title(format!(" 任务 · {} ", task.title))
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED),
-            );
-        frame.render_widget(widget, sections[1]);
-    } else {
-        let widget = Paragraph::new(app.status_message.clone())
-            .style(Style::default().fg(Color::Rgb(219, 240, 243)))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .title(" 状态 ")
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED),
-            );
-        frame.render_widget(widget, sections[1]);
+fn footer_shortcuts(app: &App, input_mode: InputMode) -> &'static str {
+    if input_mode == InputMode::Filtering {
+        return "输入关键字   Enter 应用   Esc 取消   Backspace 删除";
     }
+
+    match app.page() {
+        Page::CacheCleanup => "↑↓ 选择   Space 勾选   a 全选   r 重扫   d 删除   ? 帮助   q 退出",
+        Page::SpaceExplorer => {
+            "↑↓ 选择   Enter 进入   Backspace 返回   / 过滤   o 打开目录   r 重扫   ? 帮助"
+        }
+    }
+}
+
+fn task_card_supporting_text(task: &BackgroundTaskStatus) -> String {
+    task.progress_label_text()
+        .unwrap_or_else(|| task.message.clone())
+}
+
+fn render_task_card(frame: &mut Frame, area: Rect, task: &BackgroundTaskStatus) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let card_style = Style::default()
+        .bg(Color::Rgb(27, 49, 68))
+        .fg(Color::Rgb(219, 240, 243));
+
+    let ratio_text = task
+        .progress_ratio()
+        .map(|ratio| format!("{:.0}%", ratio * 100.0))
+        .unwrap_or_else(|| "进行中".to_string());
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("后台任务", card_style.add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {ratio_text}"), card_style),
+    ]))
+    .style(card_style)
+    .alignment(Alignment::Right);
+    frame.render_widget(title, rows[0]);
+
+    if let Some(ratio) = task.progress_ratio() {
+        let gauge = LineGauge::default()
+            .ratio(ratio)
+            .filled_style(
+                Style::default()
+                    .fg(Color::Rgb(129, 214, 219))
+                    .bg(Color::Rgb(27, 49, 68)),
+            )
+            .unfilled_style(
+                Style::default()
+                    .fg(Color::Rgb(75, 93, 111))
+                    .bg(Color::Rgb(27, 49, 68)),
+            )
+            .label("");
+        frame.render_widget(gauge, rows[1]);
+    } else {
+        let spacer = Paragraph::new("").style(card_style);
+        frame.render_widget(spacer, rows[1]);
+    }
+
+    let detail = Paragraph::new(task_card_supporting_text(task))
+        .style(card_style)
+        .alignment(Alignment::Right)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, rows[2]);
 }
 
 fn render_help_dialog(frame: &mut Frame, area: Rect) {
@@ -534,5 +571,58 @@ fn cache_status_label(item: &CacheDiscovery) -> String {
         }
         CacheSizeState::Unavailable => "不可用".into(),
         CacheSizeState::Error => "失败".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputMode, footer_shortcuts, header_status_text, task_card_supporting_text};
+    use crate::app::App;
+    use crate::models::BackgroundTaskStatus;
+
+    #[test]
+    fn footer_shortcuts_match_cache_cleanup_page() {
+        let app = App::default();
+        assert_eq!(
+            footer_shortcuts(&app, InputMode::Normal),
+            "↑↓ 选择   Space 勾选   a 全选   r 重扫   d 删除   ? 帮助   q 退出"
+        );
+    }
+
+    #[test]
+    fn footer_shortcuts_match_space_explorer_page() {
+        let mut app = App::default();
+        app.next_page();
+        assert_eq!(
+            footer_shortcuts(&app, InputMode::Normal),
+            "↑↓ 选择   Enter 进入   Backspace 返回   / 过滤   o 打开目录   r 重扫   ? 帮助"
+        );
+    }
+
+    #[test]
+    fn footer_shortcuts_match_filtering_mode() {
+        let mut app = App::default();
+        app.next_page();
+        assert_eq!(
+            footer_shortcuts(&app, InputMode::Filtering),
+            "输入关键字   Enter 应用   Esc 取消   Backspace 删除"
+        );
+    }
+
+    #[test]
+    fn header_status_text_prefers_task_summary_when_task_exists() {
+        let mut app = App::default();
+        app.status_message = "按 ? 查看帮助".into();
+        app.task_status = Some(BackgroundTaskStatus::new("目录扫描", "正在计算大小", true));
+
+        assert_eq!(header_status_text(&app), "目录扫描 · 正在计算大小");
+    }
+
+    #[test]
+    fn task_card_supporting_text_prefers_progress_label() {
+        let mut status = BackgroundTaskStatus::new("目录扫描", "正在计算大小", true);
+        status.progress_label = Some("已完成 3/6".into());
+
+        assert_eq!(task_card_supporting_text(&status), "已完成 3/6");
     }
 }
