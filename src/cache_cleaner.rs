@@ -1,0 +1,386 @@
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheTargetKind {
+    Uv,
+    Npm,
+    Pnpm,
+    Docker,
+    Cargo,
+}
+
+impl CacheTargetKind {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Uv => "uv",
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+            Self::Docker => "docker",
+            Self::Cargo => "cargo",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Uv => "Python 包管理器 uv 的全局缓存",
+            Self::Npm => "npm cache 与下载产物",
+            Self::Pnpm => "pnpm store 全局缓存",
+            Self::Docker => "Docker builder cache 与 dangling build cache",
+            Self::Cargo => "Cargo registry 与 git 缓存",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandOutput {
+    pub stdout: String,
+}
+
+impl CommandOutput {
+    pub fn success(stdout: impl Into<String>) -> Self {
+        Self {
+            stdout: stdout.into(),
+        }
+    }
+}
+
+pub trait CommandRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SystemCommandRunner;
+
+impl CommandRunner for SystemCommandRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
+        let output = Command::new(program)
+            .args(args.iter().map(OsStr::new))
+            .output()
+            .with_context(|| format!("failed to run {program}"))?;
+        if !output.status.success() {
+            return Err(anyhow!("{program} exited with {}", output.status));
+        }
+        Ok(CommandOutput::success(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheDiscovery {
+    pub kind: CacheTargetKind,
+    pub label: String,
+    pub description: String,
+    pub paths: Vec<PathBuf>,
+    pub available: bool,
+    pub reclaimable_bytes: Option<u64>,
+    pub total_bytes: u64,
+    pub selected: bool,
+    pub note: Option<String>,
+}
+
+impl CacheDiscovery {
+    pub fn new(kind: CacheTargetKind, label: String, paths: Vec<PathBuf>) -> Self {
+        Self {
+            kind,
+            label,
+            description: kind.description().to_string(),
+            paths,
+            available: true,
+            reclaimable_bytes: None,
+            total_bytes: 0,
+            selected: false,
+            note: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupPreview {
+    pub items: Vec<CacheDiscovery>,
+    pub total_reclaimable_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupOutcome {
+    pub label: String,
+    pub bytes_reclaimed: u64,
+    pub skipped: Vec<String>,
+}
+
+pub fn discover_cache_target(
+    kind: CacheTargetKind,
+    runner: &impl CommandRunner,
+    user_profile: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+) -> Result<CacheDiscovery> {
+    let mut discovery = CacheDiscovery::new(kind, kind.display_name().to_string(), Vec::new());
+
+    match kind {
+        CacheTargetKind::Uv => {
+            discovery.paths = command_path(runner, "uv", &["cache", "dir"])
+                .into_iter()
+                .collect::<Vec<_>>();
+            if discovery.paths.is_empty()
+                && let Some(base) = local_app_data
+            {
+                discovery.paths.push(base.join("uv").join("cache"));
+            }
+        }
+        CacheTargetKind::Npm => {
+            discovery.paths = command_path(runner, "npm", &["config", "get", "cache"])
+                .into_iter()
+                .collect::<Vec<_>>();
+            if discovery.paths.is_empty()
+                && let Some(base) = local_app_data
+            {
+                discovery.paths.push(base.join("npm-cache"));
+            }
+        }
+        CacheTargetKind::Pnpm => {
+            discovery.paths = command_path(runner, "pnpm", &["store", "path"])
+                .into_iter()
+                .collect::<Vec<_>>();
+            if discovery.paths.is_empty() {
+                if let Some(base) = local_app_data.as_ref() {
+                    discovery
+                        .paths
+                        .push(base.join("pnpm").join("store").join("v3"));
+                }
+                if let Some(home) = user_profile.as_ref() {
+                    discovery.paths.push(
+                        home.join("AppData")
+                            .join("Local")
+                            .join("pnpm")
+                            .join("store")
+                            .join("v3"),
+                    );
+                }
+            }
+        }
+        CacheTargetKind::Cargo => {
+            if let Some(home) = user_profile {
+                discovery.paths = vec![
+                    home.join(".cargo").join("registry"),
+                    home.join(".cargo").join("git"),
+                ];
+            }
+        }
+        CacheTargetKind::Docker => {
+            let output = runner.run("docker", &["system", "df", "--format", "json"]);
+            match output {
+                Ok(output) => {
+                    discovery.available = true;
+                    discovery.note = Some("仅清理 docker builder cache".into());
+                    discovery.reclaimable_bytes = parse_docker_reclaimable(&output.stdout);
+                }
+                Err(_) => {
+                    discovery.available = false;
+                    discovery.note = Some("未检测到 docker CLI 或当前会话不可用".into());
+                }
+            }
+        }
+    }
+
+    if kind != CacheTargetKind::Docker {
+        discovery.paths.sort();
+        discovery.paths.dedup();
+        discovery.available =
+            discovery.paths.iter().any(|path| path.exists()) || !discovery.paths.is_empty();
+        discovery.total_bytes = discovery
+            .paths
+            .iter()
+            .filter_map(|path| compute_path_size(path).ok())
+            .sum();
+        discovery.reclaimable_bytes = Some(discovery.total_bytes);
+        if discovery.paths.is_empty() {
+            discovery.available = false;
+            discovery.note = Some("未发现缓存路径".into());
+        }
+    }
+
+    Ok(discovery)
+}
+
+pub fn discover_all_caches(
+    runner: &impl CommandRunner,
+    user_profile: PathBuf,
+    local_app_data: PathBuf,
+) -> Result<Vec<CacheDiscovery>> {
+    let kinds = [
+        CacheTargetKind::Uv,
+        CacheTargetKind::Npm,
+        CacheTargetKind::Pnpm,
+        CacheTargetKind::Docker,
+        CacheTargetKind::Cargo,
+    ];
+    kinds
+        .into_iter()
+        .map(|kind| {
+            discover_cache_target(
+                kind,
+                runner,
+                Some(user_profile.clone()),
+                Some(local_app_data.clone()),
+            )
+        })
+        .collect()
+}
+
+pub fn build_cleanup_preview(items: &[CacheDiscovery]) -> CleanupPreview {
+    let selected: Vec<CacheDiscovery> =
+        items.iter().filter(|item| item.selected).cloned().collect();
+    let total_reclaimable_bytes = selected
+        .iter()
+        .map(|item| item.reclaimable_bytes.unwrap_or(item.total_bytes))
+        .sum();
+    CleanupPreview {
+        items: selected,
+        total_reclaimable_bytes,
+    }
+}
+
+pub fn execute_cleanup(
+    items: &[CacheDiscovery],
+    runner: &impl CommandRunner,
+) -> Vec<CleanupOutcome> {
+    items
+        .iter()
+        .filter(|item| item.selected)
+        .map(|item| execute_single_cleanup(item, runner))
+        .collect()
+}
+
+fn execute_single_cleanup(item: &CacheDiscovery, runner: &impl CommandRunner) -> CleanupOutcome {
+    if item.kind == CacheTargetKind::Docker {
+        let bytes_reclaimed = item.reclaimable_bytes.unwrap_or_default();
+        let result = runner.run("docker", &["builder", "prune", "-a", "-f"]);
+        return CleanupOutcome {
+            label: item.label.clone(),
+            bytes_reclaimed: if result.is_ok() { bytes_reclaimed } else { 0 },
+            skipped: result
+                .err()
+                .map(|err| vec![err.to_string()])
+                .unwrap_or_default(),
+        };
+    }
+
+    let mut reclaimed = 0;
+    let mut skipped = Vec::new();
+    for path in &item.paths {
+        if !path.exists() {
+            skipped.push(format!("{} 不存在", path.display()));
+            continue;
+        }
+        match compute_path_size(path) {
+            Ok(size) => reclaimed += size,
+            Err(error) => skipped.push(format!("{} 统计失败: {error}", path.display())),
+        }
+        if let Err(error) = remove_path_contents(path) {
+            skipped.push(format!("{} 删除失败: {error}", path.display()));
+        }
+    }
+    CleanupOutcome {
+        label: item.label.clone(),
+        bytes_reclaimed: reclaimed,
+        skipped,
+    }
+}
+
+fn command_path(runner: &impl CommandRunner, program: &str, args: &[&str]) -> Option<PathBuf> {
+    runner.run(program, args).ok().and_then(|output| {
+        let trimmed = output.stdout.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    })
+}
+
+fn parse_docker_reclaimable(stdout: &str) -> Option<u64> {
+    for line in stdout.lines() {
+        if !line.contains("Build Cache") {
+            continue;
+        }
+        if let Some(reclaimable_idx) = line.find("\"Reclaimable\":\"") {
+            let remainder = &line[reclaimable_idx + "\"Reclaimable\":\"".len()..];
+            let value = remainder.split('"').next()?;
+            let bytes_text = value.split_whitespace().next()?;
+            return parse_size_to_bytes(bytes_text);
+        }
+    }
+    None
+}
+
+pub fn parse_size_to_bytes(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let boundary = trimmed
+        .find(|ch: char| !matches!(ch, '0'..='9' | '.'))
+        .unwrap_or(trimmed.len());
+    let number: f64 = trimmed[..boundary].parse().ok()?;
+    let unit = trimmed[boundary..].trim().to_ascii_uppercase();
+    let multiplier = match unit.as_str() {
+        "" | "B" => 1_f64,
+        "KB" | "KIB" => 1_000_f64,
+        "MB" | "MIB" => 1_000_000_f64,
+        "GB" | "GIB" => 1_000_000_000_f64,
+        "TB" | "TIB" => 1_000_000_000_000_f64,
+        _ => return None,
+    };
+    Some((number * multiplier).round() as u64)
+}
+
+pub fn compute_path_size(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+
+    let mut total = 0;
+    for entry in WalkDir::new(path).follow_links(false) {
+        let entry = entry?;
+        let file_type = entry.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_file() {
+            total += entry.metadata()?.len();
+        }
+    }
+    Ok(total)
+}
+
+fn remove_path_contents(path: &Path) -> Result<()> {
+    if path.is_file() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child_path = entry.path();
+        let metadata = fs::symlink_metadata(&child_path)?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(&child_path)?;
+        } else {
+            fs::remove_file(&child_path)?;
+        }
+    }
+    Ok(())
+}
