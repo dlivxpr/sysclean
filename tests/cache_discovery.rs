@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use sysclean::cache_cleaner::{
     CacheTargetKind, CommandOutput, CommandRunner, discover_cache_target,
 };
+use sysclean::i18n::Language;
 
 #[derive(Default)]
 struct StubRunner {
@@ -37,6 +38,7 @@ impl CommandRunner for StubRunner {
 fn cargo_discovery_uses_default_user_profile_paths() {
     let discovered = discover_cache_target(
         CacheTargetKind::Cargo,
+        Language::En,
         &StubRunner::default(),
         Some(PathBuf::from(r"C:\Users\demo")),
         Some(PathBuf::from(r"C:\Users\demo\AppData\Local")),
@@ -57,6 +59,7 @@ fn cargo_discovery_uses_default_user_profile_paths() {
 fn uv_discovery_prefers_command_result_before_default_path() {
     let discovered = discover_cache_target(
         CacheTargetKind::Uv,
+        Language::En,
         &StubRunner::default().with_command(
             "uv cache dir",
             Ok(CommandOutput::success(r"C:\custom\uv-cache")),
@@ -73,6 +76,7 @@ fn uv_discovery_prefers_command_result_before_default_path() {
 fn npm_discovery_falls_back_to_local_app_data_when_command_is_missing() {
     let discovered = discover_cache_target(
         CacheTargetKind::Npm,
+        Language::En,
         &StubRunner::default(),
         Some(PathBuf::from(r"C:\Users\demo")),
         Some(PathBuf::from(r"C:\Users\demo\AppData\Local")),
@@ -89,6 +93,7 @@ fn npm_discovery_falls_back_to_local_app_data_when_command_is_missing() {
 fn docker_discovery_marks_target_available_when_cli_responds() {
     let discovered = discover_cache_target(
         CacheTargetKind::Docker,
+        Language::En,
         &StubRunner::default().with_command(
             "docker system df --format json",
             Ok(CommandOutput::success(

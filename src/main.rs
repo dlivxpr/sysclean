@@ -18,6 +18,7 @@ use sysclean::cache_cleaner::{
     SystemCommandRunner, compute_path_size, discover_cache_metadata, execute_cleanup_with_progress,
     populate_cache_size,
 };
+use sysclean::i18n::{Language, load_installed_language};
 use sysclean::models::{BackgroundTaskStatus, DirectoryEntryInfo, ScanState};
 use sysclean::persistence::{CacheSnapshot, ScanCache};
 use sysclean::platform;
@@ -92,22 +93,23 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     let (tx, rx) = mpsc::channel::<WorkerMessage>();
-    let mut app = App::default();
+    let language = load_installed_language();
+    let mut app = App::new(language);
     let mut input_mode = InputMode::Normal;
     let mut cleanup_results = Vec::new();
     let mut latest_directory_task_id = 1_u64;
     let mut latest_cache_task_id = 1_u64;
 
-    let home = platform::home_dir()?;
+    let home = platform::home_dir(language)?;
     app.set_current_path(home.clone());
     app.task_status = Some(BackgroundTaskStatus::new(
-        "启动",
-        "正在准备缓存与目录扫描",
+        language.startup_title(),
+        language.startup_message(),
         true,
     ));
 
-    spawn_cache_scan(tx.clone(), latest_cache_task_id);
-    spawn_directory_scan(tx.clone(), latest_directory_task_id, home, false);
+    spawn_cache_scan(tx.clone(), latest_cache_task_id, language);
+    spawn_directory_scan(tx.clone(), latest_directory_task_id, home, false, language);
 
     loop {
         terminal.draw(|frame| render(frame, &app, input_mode, &cleanup_results))?;
@@ -151,12 +153,13 @@ fn handle_worker_message(
     latest_cache_task_id: &mut u64,
     message: WorkerMessage,
 ) {
+    let language = app.language();
     match message {
         WorkerMessage::CacheDiscoveryStarted { task_id, total } => {
             *latest_cache_task_id = task_id;
             app.task_status = Some(progress_status(
-                "缓存扫描",
-                format!("已发现 0/{total} 个缓存目标"),
+                language.cache_scan_title(),
+                language.cache_discovered_progress(0, total),
                 0,
                 total,
             ));
@@ -172,12 +175,12 @@ fn handle_worker_message(
             }
             app.upsert_cache_item(item);
             let mut status = progress_status(
-                "缓存扫描",
-                format!("已发现 {discovered}/{total} 个缓存目标，正在计算大小"),
+                language.cache_scan_title(),
+                language.cache_discovered_message(discovered, total),
                 discovered,
                 total,
             );
-            status.progress_label = Some(format!("已发现 {discovered}/{total}"));
+            status.progress_label = Some(language.cache_discovered_progress(discovered, total));
             app.task_status = Some(status);
         }
         WorkerMessage::CacheItemSized {
@@ -191,12 +194,12 @@ fn handle_worker_message(
             }
             app.upsert_cache_item(item);
             let mut status = progress_status(
-                "缓存扫描",
-                format!("已发现 {total}/{total} 个缓存目标，正在计算 {completed}/{total} 个大小"),
+                language.cache_scan_title(),
+                language.cache_sizing_message(completed, total),
                 completed,
                 total,
             );
-            status.progress_label = Some(format!("已完成 {completed}/{total}"));
+            status.progress_label = Some(language.progress_completed(completed, total));
             app.task_status = Some(status);
         }
         WorkerMessage::CacheScanFinished { task_id, total } => {
@@ -204,9 +207,9 @@ fn handle_worker_message(
                 return;
             }
             app.status_message = if total == 0 {
-                "未发现可扫描的缓存目标".into()
+                language.no_cache_targets().into()
             } else {
-                "缓存路径已全部展示，大小计算完成".into()
+                language.cache_scan_finished().into()
             };
             if matches!(app.page(), Page::CacheCleanup) {
                 app.task_status = None;
@@ -215,8 +218,8 @@ fn handle_worker_message(
         WorkerMessage::DirectoryScanStarted { task_id, path } => {
             *latest_directory_task_id = task_id;
             app.task_status = Some(progress_status(
-                "目录扫描",
-                format!("正在枚举 {} 的直接子目录", path.display()),
+                language.directory_scan_title(),
+                language.enumerating_directories(&path),
                 0,
                 0,
             ));
@@ -240,20 +243,20 @@ fn handle_worker_message(
             }
             app.explorer_state_mut().set_entries(entries);
             let mut status = progress_status(
-                "目录扫描",
+                language.directory_scan_title(),
                 if from_cache {
-                    format!("已从缓存加载 {total} 个子目录")
+                    language.directory_loaded_from_cache(total)
                 } else {
-                    format!("已枚举 {total} 个子目录，正在逐项计算大小")
+                    language.directory_discovered_and_sizing(total)
                 },
                 0,
                 total,
             );
             status.determinate = !from_cache && total > 0;
             status.progress_label = Some(if from_cache {
-                format!("缓存命中 {total} 项")
+                language.cache_hit_items(total)
             } else {
-                format!("已完成 0/{total}")
+                language.progress_completed(0, total)
             });
             app.task_status = Some(status);
         }
@@ -281,16 +284,16 @@ fn handle_worker_message(
             }
             app.explorer_state_mut().set_entries(current_entries);
             let mut status = progress_status(
-                "目录扫描",
+                language.directory_scan_title(),
                 if from_cache {
-                    format!("缓存结果已加载 {completed}/{total}")
+                    language.cached_directory_progress(completed, total)
                 } else {
-                    format!("已枚举 {total} 个子目录，正在计算 {completed}/{total} 个大小")
+                    language.directory_sizing_progress(completed, total)
                 },
                 completed,
                 total,
             );
-            status.progress_label = Some(format!("已完成 {completed}/{total}"));
+            status.progress_label = Some(language.progress_completed(completed, total));
             app.task_status = Some(status);
         }
         WorkerMessage::DirectoryScanFinished {
@@ -312,15 +315,15 @@ fn handle_worker_message(
             app.explorer_state_mut().set_entries(entries);
             app.task_status = None;
             app.status_message = if from_cache {
-                "目录骨架已从缓存加载，按 r 可强制重扫".into()
+                language.directory_cache_loaded_done().into()
             } else {
-                "目录骨架已展示，大小已渐进更新完成".into()
+                language.directory_progress_finished().into()
             };
         }
         WorkerMessage::CleanupFinished(results) => {
             *cleanup_results = results;
             app.task_status = None;
-            app.status_message = "缓存清理已完成".into();
+            app.status_message = language.cleanup_finished().into();
             app.last_cleanup_preview = None;
             app.show_cleanup_summary();
         }
@@ -329,7 +332,8 @@ fn handle_worker_message(
             total_bytes,
         } => {
             app.task_status = Some(cleanup_status(
-                "正在准备删除缓存".into(),
+                language,
+                language.preparing_cache_cleanup().into(),
                 0,
                 total_paths,
                 0,
@@ -338,9 +342,11 @@ fn handle_worker_message(
         }
         WorkerMessage::CleanupProgress(progress) => {
             app.task_status = Some(cleanup_status(
-                format!(
-                    "正在清理 {} ({}/{})",
-                    progress.current_label, progress.completed_paths, progress.total_paths
+                language,
+                language.cleaning_target(
+                    &progress.current_label,
+                    progress.completed_paths,
+                    progress.total_paths,
                 ),
                 progress.completed_paths,
                 progress.total_paths,
@@ -380,12 +386,12 @@ fn handle_key_event(
                 KeyCode::Esc => app.close_dialog(),
                 KeyCode::Enter => {
                     app.task_status = Some(progress_status(
-                        "缓存清理",
-                        "正在删除已完成大小计算的缓存项".into(),
+                        app.language().cleanup_title(),
+                        app.language().deleting_ready_cache_items().into(),
                         0,
                         0,
                     ));
-                    spawn_cleanup(tx.clone(), app.cache_items().to_vec());
+                    spawn_cleanup(tx.clone(), app.cache_items().to_vec(), app.language());
                 }
                 _ => {}
             }
@@ -407,7 +413,7 @@ fn handle_key_event(
         KeyCode::Tab | KeyCode::Right | KeyCode::Left => app.next_page(),
         KeyCode::Esc | KeyCode::Char('c') => {
             app.task_status = None;
-            app.status_message = "已取消当前任务显示，旧结果会被忽略".into();
+            app.status_message = app.language().task_display_cancelled().into();
         }
         _ => match app.page() {
             Page::CacheCleanup => handle_cache_keys(app, tx, latest_cache_task_id, key),
@@ -434,12 +440,12 @@ fn handle_cache_keys(
         KeyCode::Char('r') => {
             *latest_cache_task_id += 1;
             app.task_status = Some(progress_status(
-                "缓存扫描",
-                "正在重新发现缓存路径".into(),
+                app.language().cache_scan_title(),
+                app.language().rescanning_cache_paths().into(),
                 0,
                 SUPPORTED_CACHE_TARGETS.len(),
             ));
-            spawn_cache_scan(tx.clone(), *latest_cache_task_id);
+            spawn_cache_scan(tx.clone(), *latest_cache_task_id, app.language());
         }
         KeyCode::Char('d') => app.open_delete_confirmation(),
         _ => {}
@@ -463,25 +469,37 @@ fn handle_explorer_keys(
         KeyCode::Char('/') => {
             *input_mode = InputMode::Filtering;
             app.filter_input.clear();
-            app.status_message = "输入筛选关键字，按 Enter 应用".into();
+            app.status_message = app.language().filter_prompt().into();
         }
         KeyCode::Char('o') => {
             if let Some(entry) = app.explorer_state().selected_entry() {
-                platform::open_in_explorer(&entry.path)?;
-                app.status_message = format!("已在资源管理器中打开 {}", entry.path.display());
+                platform::open_in_explorer(&entry.path, app.language())?;
+                app.status_message = app.language().opened_in_explorer(&entry.path);
             }
         }
         KeyCode::Char('r') => {
             if let Some(path) = app.current_path().cloned() {
                 *latest_directory_task_id += 1;
-                spawn_directory_scan(tx.clone(), *latest_directory_task_id, path, true);
+                spawn_directory_scan(
+                    tx.clone(),
+                    *latest_directory_task_id,
+                    path,
+                    true,
+                    app.language(),
+                );
             }
         }
         KeyCode::Backspace => {
             app.pop_directory();
             if let Some(path) = app.current_path().cloned() {
                 *latest_directory_task_id += 1;
-                spawn_directory_scan(tx.clone(), *latest_directory_task_id, path, false);
+                spawn_directory_scan(
+                    tx.clone(),
+                    *latest_directory_task_id,
+                    path,
+                    false,
+                    app.language(),
+                );
             }
         }
         KeyCode::Enter => {
@@ -491,9 +509,15 @@ fn handle_explorer_keys(
                 let next = entry.path.clone();
                 app.push_directory(next.clone());
                 app.explorer_state_mut().set_entries(Vec::new());
-                app.status_message = format!("已进入 {}，正在枚举子目录", next.display());
+                app.status_message = app.language().entered_directory(&next);
                 *latest_directory_task_id += 1;
-                spawn_directory_scan(tx.clone(), *latest_directory_task_id, next, false);
+                spawn_directory_scan(
+                    tx.clone(),
+                    *latest_directory_task_id,
+                    next,
+                    false,
+                    app.language(),
+                );
             }
         }
         _ => {}
@@ -505,16 +529,16 @@ fn handle_filter_input(app: &mut App, input_mode: &mut InputMode, key: KeyEvent)
     match key.code {
         KeyCode::Esc => {
             *input_mode = InputMode::Normal;
-            app.status_message = "已退出过滤模式".into();
+            app.status_message = app.language().exited_filter_mode().into();
         }
         KeyCode::Enter => {
             let filter = app.filter_input.clone();
             app.explorer_state_mut().set_filter(filter);
             *input_mode = InputMode::Normal;
             app.status_message = if app.filter_input.is_empty() {
-                "已清空过滤条件".into()
+                app.language().cleared_filter().into()
             } else {
-                format!("过滤: {}", app.filter_input)
+                app.language().applied_filter(&app.filter_input)
             };
         }
         KeyCode::Backspace => {
@@ -532,20 +556,24 @@ fn handle_filter_input(app: &mut App, input_mode: &mut InputMode, key: KeyEvent)
     Ok(false)
 }
 
-fn spawn_cache_scan(tx: Sender<WorkerMessage>, task_id: u64) {
+fn spawn_cache_scan(tx: Sender<WorkerMessage>, task_id: u64, language: Language) {
     thread::spawn(move || {
         let runner = SystemCommandRunner;
-        let home = match platform::home_dir() {
+        let home = match platform::home_dir(language) {
             Ok(path) => path,
             Err(error) => {
-                let _ = tx.send(WorkerMessage::TaskFailed(format!("缓存扫描失败: {error}")));
+                let _ = tx.send(WorkerMessage::TaskFailed(
+                    language.cache_scan_failed(&error.to_string()),
+                ));
                 return;
             }
         };
-        let local = match platform::local_app_data_dir() {
+        let local = match platform::local_app_data_dir(language) {
             Ok(path) => path,
             Err(error) => {
-                let _ = tx.send(WorkerMessage::TaskFailed(format!("缓存扫描失败: {error}")));
+                let _ = tx.send(WorkerMessage::TaskFailed(
+                    language.cache_scan_failed(&error.to_string()),
+                ));
                 return;
             }
         };
@@ -559,13 +587,16 @@ fn spawn_cache_scan(tx: Sender<WorkerMessage>, task_id: u64) {
         for (discovered, kind) in SUPPORTED_CACHE_TARGETS.iter().copied().enumerate() {
             let item = match discover_cache_metadata(
                 kind,
+                language,
                 &runner,
                 Some(home.clone()),
                 Some(local.clone()),
             ) {
                 Ok(item) => item,
                 Err(error) => {
-                    let _ = tx.send(WorkerMessage::TaskFailed(format!("缓存扫描失败: {error}")));
+                    let _ = tx.send(WorkerMessage::TaskFailed(
+                        language.cache_scan_failed(&error.to_string()),
+                    ));
                     return;
                 }
             };
@@ -599,7 +630,7 @@ fn spawn_cache_scan(tx: Sender<WorkerMessage>, task_id: u64) {
             let size_tx = size_tx.clone();
             thread::spawn(move || {
                 let mut sized_item = item;
-                let _ = populate_cache_size(&mut sized_item);
+                let _ = populate_cache_size(&mut sized_item, language);
                 let _ = size_tx.send(sized_item);
             });
         }
@@ -625,6 +656,7 @@ fn spawn_directory_scan(
     task_id: u64,
     path: PathBuf,
     force_refresh: bool,
+    language: Language,
 ) {
     thread::spawn(move || {
         let _ = tx.send(WorkerMessage::DirectoryScanStarted {
@@ -632,18 +664,18 @@ fn spawn_directory_scan(
             path: path.clone(),
         });
 
-        let cache = match platform::app_cache_file() {
+        let cache = match platform::app_cache_file(language) {
             Ok(file_path) => ScanCache::new(file_path),
             Err(error) => {
-                let _ = tx.send(WorkerMessage::TaskFailed(format!(
-                    "初始化扫描缓存失败: {error}"
-                )));
+                let _ = tx.send(WorkerMessage::TaskFailed(
+                    language.init_scan_cache_failed(&error.to_string()),
+                ));
                 return;
             }
         };
 
         if !force_refresh {
-            match load_directory_entries(&path, &cache) {
+            match load_directory_entries(&path, &cache, language) {
                 Ok((entries, true)) => {
                     let total = entries.len();
                     let _ = tx.send(WorkerMessage::DirectoryEntriesDiscovered {
@@ -663,19 +695,20 @@ fn spawn_directory_scan(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    let _ = tx.send(WorkerMessage::TaskFailed(format!("目录扫描失败: {error}")));
+                    let _ = tx.send(WorkerMessage::TaskFailed(
+                        language.directory_scan_failed(&error.to_string()),
+                    ));
                     return;
                 }
             }
         }
 
-        let mut entries = match discover_directory_skeleton(&path) {
+        let mut entries = match discover_directory_skeleton(&path, language) {
             Ok(entries) => entries,
             Err(error) => {
-                let _ = tx.send(WorkerMessage::TaskFailed(format!(
-                    "无法枚举目录 {}: {error}",
-                    path.display()
-                )));
+                let _ = tx.send(WorkerMessage::TaskFailed(
+                    language.unable_to_enumerate_directory(&path, &error.to_string()),
+                ));
                 return;
             }
         };
@@ -773,7 +806,7 @@ fn spawn_directory_scan(
     });
 }
 
-fn spawn_cleanup(tx: Sender<WorkerMessage>, items: Vec<CacheDiscovery>) {
+fn spawn_cleanup(tx: Sender<WorkerMessage>, items: Vec<CacheDiscovery>, language: Language) {
     thread::spawn(move || {
         let runner = SystemCommandRunner;
         let selected = items
@@ -802,7 +835,7 @@ fn spawn_cleanup(tx: Sender<WorkerMessage>, items: Vec<CacheDiscovery>) {
             total_bytes,
         });
         let progress_tx = tx.clone();
-        let results = execute_cleanup_with_progress(&items, &runner, move |progress| {
+        let results = execute_cleanup_with_progress(&items, language, &runner, move |progress| {
             let _ = progress_tx.send(WorkerMessage::CleanupProgress(progress));
         });
         let _ = tx.send(WorkerMessage::CleanupFinished(results));
@@ -823,28 +856,28 @@ fn progress_status(
 }
 
 fn cleanup_status(
+    language: Language,
     message: String,
     completed_paths: usize,
     total_paths: usize,
     completed_bytes: u64,
     total_bytes: Option<u64>,
 ) -> BackgroundTaskStatus {
-    let mut status = BackgroundTaskStatus::new("缓存清理", message, true);
+    let mut status = BackgroundTaskStatus::new(language.cleanup_title(), message, true);
     status.progress_current = completed_paths;
     status.progress_total = total_paths;
     status.bytes_current = total_bytes.map(|_| completed_bytes);
     status.bytes_total = total_bytes;
     status.determinate = total_bytes.is_some() && total_paths > 0;
     status.progress_label = Some(if let Some(total_bytes) = total_bytes {
-        format!(
-            "已释放 {} / {}",
-            sysclean::ui::format_size(completed_bytes),
-            sysclean::ui::format_size(total_bytes)
+        language.cleanup_progress_bytes(
+            &sysclean::ui::format_size(completed_bytes),
+            &sysclean::ui::format_size(total_bytes),
         )
     } else if total_paths > 0 {
-        format!("已处理 {completed_paths}/{total_paths} 个目标")
+        language.cleanup_progress_targets(completed_paths, total_paths)
     } else {
-        "正在准备清理目标".into()
+        language.cleanup_progress_preparing().into()
     });
     status
 }

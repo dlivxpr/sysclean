@@ -68,6 +68,14 @@ cargo run --release
 
 如果你的用户目录内容很多，建议优先使用 `--release`，扫描体验会更好一些。
 
+### 4. MSI 安装器
+
+如果你通过 MSI 安装 SysClean：
+
+- 安装器界面默认保持英文
+- 安装时可以选择 TUI 语言：`English` 或 `Simplified Chinese`
+- TUI 语言会在安装时固定；后续如果想切换，只能重新安装并重新选择
+
 ## 使用说明
 
 ### 界面结构

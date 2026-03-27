@@ -9,6 +9,7 @@ use ratatui::widgets::{
 
 use crate::app::{ActiveDialog, App, Page};
 use crate::cache_cleaner::{CacheDiscovery, CacheSizeState, CleanupOutcome};
+use crate::i18n::Language;
 use crate::models::{BackgroundTaskStatus, DirectoryEntryInfo, ScanState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,20 +42,23 @@ pub fn render(
     render_footer(frame, vertical[2], app, input_mode);
 
     match app.active_dialog() {
-        ActiveDialog::Help => render_help_dialog(frame, area),
+        ActiveDialog::Help => render_help_dialog(frame, area, app.language()),
         ActiveDialog::DeleteConfirmation => render_delete_dialog(frame, area, app),
-        ActiveDialog::CleanupSummary => render_cleanup_summary(frame, area, cleanup_results),
+        ActiveDialog::CleanupSummary => {
+            render_cleanup_summary(frame, area, cleanup_results, app.language())
+        }
         ActiveDialog::None => {}
     }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    let language = app.language();
     let parts = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(38), Constraint::Min(10)])
         .split(area);
 
-    let titles = ["Cache Cleanup", "Space Explorer"]
+    let titles = [language.cache_cleanup_tab(), language.space_explorer_tab()]
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -81,7 +85,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(tabs, parts[0]);
 
     let status_block = Block::default()
-        .title(" 状态 ")
+        .title(language.status_title())
         .borders(Borders::ALL)
         .border_set(border::ROUNDED);
     let inner = status_block.inner(parts[1]);
@@ -115,7 +119,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(status_widget, columns[0]);
 
     if let (Some(task), Some(_)) = (app.task_status.as_ref(), task_width) {
-        render_task_card(frame, columns[1], task);
+        render_task_card(frame, columns[1], task, language);
     }
 }
 
@@ -136,15 +140,22 @@ fn render_cache_page(frame: &mut Frame, area: Rect, app: &App) {
         columns[0],
         app.cache_items(),
         app.selected_cache_index(),
+        app.language(),
     );
-    render_cache_details(frame, columns[1], app.selected_cache());
+    render_cache_details(frame, columns[1], app.selected_cache(), app.language());
 }
 
-fn render_cache_table(frame: &mut Frame, area: Rect, items: &[CacheDiscovery], selected: usize) {
+fn render_cache_table(
+    frame: &mut Frame,
+    area: Rect,
+    items: &[CacheDiscovery],
+    selected: usize,
+    language: Language,
+) {
     let rows = items.iter().map(|item| {
-        let reclaimable = format_cache_size(item.reclaimable_bytes, item.size_state);
-        let total = format_cache_size(Some(item.total_bytes), item.size_state);
-        let status = cache_status_label(item);
+        let reclaimable = format_cache_size(item.reclaimable_bytes, item.size_state, language);
+        let total = format_cache_size(Some(item.total_bytes), item.size_state, language);
+        let status = cache_status_label(item, language);
         let label = if item.selected {
             format!("[x] {}", item.label)
         } else {
@@ -160,7 +171,13 @@ fn render_cache_table(frame: &mut Frame, area: Rect, items: &[CacheDiscovery], s
     ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(vec!["缓存", "可释放", "占用", "状态"]).style(
+            Row::new(vec![
+                language.cache_column_cache(),
+                language.cache_column_reclaimable(),
+                language.cache_column_used(),
+                language.cache_column_status(),
+            ])
+            .style(
                 Style::default()
                     .fg(Color::Rgb(129, 214, 219))
                     .add_modifier(Modifier::BOLD),
@@ -168,7 +185,7 @@ fn render_cache_table(frame: &mut Frame, area: Rect, items: &[CacheDiscovery], s
         )
         .block(
             Block::default()
-                .title(" 缓存清理 ")
+                .title(language.cache_cleanup_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -181,10 +198,15 @@ fn render_cache_table(frame: &mut Frame, area: Rect, items: &[CacheDiscovery], s
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_cache_details(frame: &mut Frame, area: Rect, selected: Option<&CacheDiscovery>) {
+fn render_cache_details(
+    frame: &mut Frame,
+    area: Rect,
+    selected: Option<&CacheDiscovery>,
+    language: Language,
+) {
     let details = if let Some(item) = selected {
         let paths = if item.paths.is_empty() {
-            "此目标通过 docker CLI 清理，不直接暴露删除任意路径。".to_string()
+            language.docker_cli_only_note().to_string()
         } else {
             item.paths
                 .iter()
@@ -193,22 +215,29 @@ fn render_cache_details(frame: &mut Frame, area: Rect, selected: Option<&CacheDi
                 .join("\n")
         };
         format!(
-            "名称: {}\n说明: {}\n状态: {}\n路径数: {}\n可释放: {}\n备注: {}\n\n路径:\n{}",
+            "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}:\n{}",
+            language.detail_name_label(),
             item.label,
+            language.detail_description_label(),
             item.description,
-            cache_status_label(item),
+            language.detail_status_label(),
+            cache_status_label(item, language),
+            language.detail_path_count_label(),
             item.paths.len(),
-            format_cache_size(item.reclaimable_bytes, item.size_state),
-            item.note.as_deref().unwrap_or("无"),
+            language.detail_reclaimable_label(),
+            format_cache_size(item.reclaimable_bytes, item.size_state, language),
+            language.detail_note_label(),
+            item.note.as_deref().unwrap_or(language.none_text()),
+            language.detail_paths_label(),
             paths
         )
     } else {
-        "暂无缓存项。".to_string()
+        language.no_cache_items().to_string()
     };
     let widget = Paragraph::new(details)
         .block(
             Block::default()
-                .title(" 明细 ")
+                .title(language.cache_details_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -217,25 +246,28 @@ fn render_cache_details(frame: &mut Frame, area: Rect, selected: Option<&CacheDi
 }
 
 fn render_explorer_page(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode) {
+    let language = app.language();
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(8)])
         .split(area);
     let banner = Paragraph::new(format!(
-        "当前位置: {}\n筛选: {}{}",
+        "{}: {}\n{}: {}{}",
+        language.current_path_label(),
         app.current_path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<未加载>".into()),
+            .unwrap_or_else(|| language.not_loaded().into()),
+        language.filter_label(),
         app.explorer_state().filter(),
         if input_mode == InputMode::Filtering {
-            "  (输入中)"
+            language.inputting_suffix()
         } else {
             ""
         }
     ))
     .block(
         Block::default()
-            .title(" 路径 ")
+            .title(language.path_title())
             .borders(Borders::ALL)
             .border_set(border::ROUNDED),
     )
@@ -246,29 +278,27 @@ fn render_explorer_page(frame: &mut Frame, area: Rect, app: &App, input_mode: In
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(sections[1]);
-    render_explorer_list(frame, columns[0], app);
-    render_explorer_details(frame, columns[1], app.explorer_state().selected_entry());
+    render_explorer_list(frame, columns[0], app, language);
+    render_explorer_details(
+        frame,
+        columns[1],
+        app.explorer_state().selected_entry(),
+        language,
+    );
 }
 
-fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
+fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App, language: Language) {
     let visible = app.explorer_state().visible_entries();
     let rows = visible
         .iter()
         .map(|entry| {
-            let status = match entry.scan_state {
-                ScanState::Ready => "就绪",
-                ScanState::Cached => "缓存",
-                ScanState::Scanning => "扫描中",
-                ScanState::Pending => "待扫描",
-                ScanState::Skipped => "跳过",
-                ScanState::Error => "失败",
-            };
+            let status = language.scan_state(entry.scan_state);
             Row::new(vec![
                 Cell::from(entry.name.clone())
                     .style(Style::default().fg(Color::Rgb(224, 241, 244))),
-                Cell::from(format!("{:>10}", format_directory_size(entry)))
+                Cell::from(format!("{:>10}", format_directory_size(entry, language)))
                     .style(Style::default().fg(Color::Rgb(129, 214, 219))),
-                Cell::from(format!("{status:<6}")).style(Style::default().fg(Color::Gray)),
+                Cell::from(format!("{status:<8}")).style(Style::default().fg(Color::Gray)),
             ])
         })
         .collect::<Vec<_>>();
@@ -277,11 +307,16 @@ fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
         [
             Constraint::Fill(1),
             Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(10),
         ],
     )
     .header(
-        Row::new(vec!["目录", "大小", "状态"]).style(
+        Row::new(vec![
+            language.directory_column_name(),
+            language.directory_column_size(),
+            language.directory_column_status(),
+        ])
+        .style(
             Style::default()
                 .fg(Color::Rgb(129, 214, 219))
                 .add_modifier(Modifier::BOLD),
@@ -289,7 +324,7 @@ fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
     )
     .block(
         Block::default()
-            .title(" 目录分析 ")
+            .title(language.space_explorer_title())
             .borders(Borders::ALL)
             .border_set(border::ROUNDED),
     )
@@ -302,24 +337,39 @@ fn render_explorer_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_explorer_details(frame: &mut Frame, area: Rect, entry: Option<&DirectoryEntryInfo>) {
+fn render_explorer_details(
+    frame: &mut Frame,
+    area: Rect,
+    entry: Option<&DirectoryEntryInfo>,
+    language: Language,
+) {
     let text = if let Some(entry) = entry {
         format!(
-            "目录: {}\n路径: {}\n大小: {}\n可进入: {}\n状态: {:?}\n备注: {}",
+            "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+            language.directory_label(),
             entry.name,
+            language.path_label(),
             entry.path.display(),
+            language.size_label(),
             format_size(entry.size_bytes),
-            if entry.can_enter { "是" } else { "否" },
-            entry.scan_state,
-            entry.message.as_deref().unwrap_or("无"),
+            language.can_enter_label(),
+            if entry.can_enter {
+                language.yes_text()
+            } else {
+                language.no_text()
+            },
+            language.detail_status_label(),
+            language.scan_state(entry.scan_state),
+            language.remark_label(),
+            entry.message.as_deref().unwrap_or(language.none_text()),
         )
     } else {
-        "没有可显示的目录。".to_string()
+        language.no_directory_entries().to_string()
     };
     let widget = Paragraph::new(text)
         .block(
             Block::default()
-                .title(" 详情 ")
+                .title(language.detail_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -333,7 +383,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode
         .alignment(Alignment::Center)
         .block(
             Block::default()
-                .title(" 常用快捷键 ")
+                .title(app.language().shortcuts_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -343,14 +393,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, input_mode: InputMode
 
 fn footer_shortcuts(app: &App, input_mode: InputMode) -> &'static str {
     if input_mode == InputMode::Filtering {
-        return "输入关键字   Enter 应用   Esc 取消   Backspace 删除";
+        return app.language().filtering_shortcuts();
     }
 
     match app.page() {
-        Page::CacheCleanup => "↑↓ 选择   Space 勾选   a 全选   r 重扫   d 删除   ? 帮助   q 退出",
-        Page::SpaceExplorer => {
-            "↑↓ 选择   Enter 进入   Backspace 返回   / 过滤   o 打开目录   r 重扫   ? 帮助"
-        }
+        Page::CacheCleanup => app.language().cache_shortcuts(),
+        Page::SpaceExplorer => app.language().explorer_shortcuts(),
     }
 }
 
@@ -359,7 +407,12 @@ fn task_card_supporting_text(task: &BackgroundTaskStatus) -> String {
         .unwrap_or_else(|| task.message.clone())
 }
 
-fn render_task_card(frame: &mut Frame, area: Rect, task: &BackgroundTaskStatus) {
+fn render_task_card(
+    frame: &mut Frame,
+    area: Rect,
+    task: &BackgroundTaskStatus,
+    language: Language,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -375,9 +428,12 @@ fn render_task_card(frame: &mut Frame, area: Rect, task: &BackgroundTaskStatus) 
     let ratio_text = task
         .progress_ratio()
         .map(|ratio| format!("{:.0}%", ratio * 100.0))
-        .unwrap_or_else(|| "进行中".to_string());
+        .unwrap_or_else(|| language.in_progress().to_string());
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("后台任务", card_style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            language.background_task(),
+            card_style.add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("  {ratio_text}"), card_style),
     ]))
     .style(card_style)
@@ -411,14 +467,13 @@ fn render_task_card(frame: &mut Frame, area: Rect, task: &BackgroundTaskStatus) 
     frame.render_widget(detail, rows[2]);
 }
 
-fn render_help_dialog(frame: &mut Frame, area: Rect) {
+fn render_help_dialog(frame: &mut Frame, area: Rect, language: Language) {
     let popup = centered_rect(70, 70, area);
     frame.render_widget(Clear, popup);
-    let text = "全局快捷键\nTab / ←→ 切换工作区\nq 退出\n? 打开帮助\nEsc 关闭弹窗或取消输入\n\n缓存清理\n↑↓ 选择缓存\nSpace 勾选\nA 全选或反选\nR 重扫缓存\nD 打开删除确认\n路径会先显示，大小会后台逐项更新\n\n目录分析\n↑↓ 选择目录\nEnter 进入目录\nBackspace 返回上级\nHome / End 跳到首尾\nPgUp / PgDn 快速翻页\n/ 进入过滤\nO 打开资源管理器\n进入目录后会先展示骨架，再边扫边重排";
-    let widget = Paragraph::new(text)
+    let widget = Paragraph::new(language.help_dialog_text())
         .block(
             Block::default()
-                .title(" 帮助 ")
+                .title(language.help_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -427,6 +482,7 @@ fn render_help_dialog(frame: &mut Frame, area: Rect) {
 }
 
 fn render_delete_dialog(frame: &mut Frame, area: Rect, app: &App) {
+    let language = app.language();
     let popup = centered_rect(60, 50, area);
     frame.render_widget(Clear, popup);
     let content = if let Some(preview) = &app.last_cleanup_preview {
@@ -437,23 +493,19 @@ fn render_delete_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 format!(
                     "• {} ({})",
                     item.label,
-                    format_cache_size(item.reclaimable_bytes, item.size_state)
+                    format_cache_size(item.reclaimable_bytes, item.size_state, language)
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!(
-            "即将删除以下缓存项:\n{}\n\n预计释放: {}\n\n按 Enter 确认, Esc 取消。",
-            items,
-            format_size(preview.total_reclaimable_bytes)
-        )
+        language.delete_confirmation_body(&items, &format_size(preview.total_reclaimable_bytes))
     } else {
-        "没有选中的缓存项。".to_string()
+        language.no_selected_cache_items().to_string()
     };
     let widget = Paragraph::new(content)
         .block(
             Block::default()
-                .title(" 删除确认 ")
+                .title(language.delete_confirmation_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -461,7 +513,12 @@ fn render_delete_dialog(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(widget, popup);
 }
 
-fn render_cleanup_summary(frame: &mut Frame, area: Rect, cleanup_results: &[CleanupOutcome]) {
+fn render_cleanup_summary(
+    frame: &mut Frame,
+    area: Rect,
+    cleanup_results: &[CleanupOutcome],
+    language: Language,
+) {
     let popup = centered_rect(68, 60, area);
     frame.render_widget(Clear, popup);
     let released: u64 = cleanup_results
@@ -472,31 +529,22 @@ fn render_cleanup_summary(frame: &mut Frame, area: Rect, cleanup_results: &[Clea
         .iter()
         .map(|item| {
             if item.skipped.is_empty() {
-                format!(
-                    "• {}: 释放 {}",
-                    item.label,
-                    format_size(item.bytes_reclaimed)
-                )
+                language.cleanup_result_line(&item.label, &format_size(item.bytes_reclaimed))
             } else {
-                format!(
-                    "• {}: 释放 {} | 跳过 {} 项",
-                    item.label,
-                    format_size(item.bytes_reclaimed),
-                    item.skipped.len()
+                language.cleanup_result_line_with_skipped(
+                    &item.label,
+                    &format_size(item.bytes_reclaimed),
+                    item.skipped.len(),
                 )
             }
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let text = format!(
-        "本次清理完成。\n总释放: {}\n\n{}\n\n按 Esc 或 Enter 关闭。",
-        format_size(released),
-        body
-    );
+    let text = language.cleanup_summary_body(&format_size(released), &body);
     let widget = Paragraph::new(text)
         .block(
             Block::default()
-                .title(" 清理结果 ")
+                .title(language.cleanup_results_title())
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED),
         )
@@ -538,39 +586,38 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-fn format_cache_size(bytes: Option<u64>, state: CacheSizeState) -> String {
+fn format_cache_size(bytes: Option<u64>, state: CacheSizeState, language: Language) -> String {
     match state {
-        CacheSizeState::Pending => "待计算".into(),
-        CacheSizeState::Scanning => "计算中".into(),
-        CacheSizeState::Unavailable => "不可用".into(),
-        CacheSizeState::Error => "失败".into(),
         CacheSizeState::Ready => format_size(bytes.unwrap_or_default()),
+        _ => language.cache_size_state(state).into(),
     }
 }
 
-fn format_directory_size(entry: &DirectoryEntryInfo) -> String {
+fn format_directory_size(entry: &DirectoryEntryInfo, language: Language) -> String {
     match entry.scan_state {
-        ScanState::Pending => "待计算".into(),
-        ScanState::Scanning => "计算中".into(),
+        ScanState::Pending => language.cache_size_state(CacheSizeState::Pending).into(),
+        ScanState::Scanning => language.cache_size_state(CacheSizeState::Scanning).into(),
         _ => format_size(entry.size_bytes),
     }
 }
 
-fn cache_status_label(item: &CacheDiscovery) -> String {
+fn cache_status_label(item: &CacheDiscovery, language: Language) -> String {
     match item.size_state {
-        CacheSizeState::Pending => "待计算".into(),
-        CacheSizeState::Scanning => "计算中".into(),
+        CacheSizeState::Pending => language.cache_size_state(CacheSizeState::Pending).into(),
+        CacheSizeState::Scanning => language.cache_size_state(CacheSizeState::Scanning).into(),
         CacheSizeState::Ready => {
             if item.paths.is_empty() {
-                "命令型目标".into()
+                language.cache_status_command_target().into()
             } else if item.total_bytes == 0 {
-                "已检查 0B".into()
+                language.cache_status_checked_zero().into()
             } else {
-                "可清理".into()
+                language.cache_status_reclaimable().into()
             }
         }
-        CacheSizeState::Unavailable => "不可用".into(),
-        CacheSizeState::Error => "失败".into(),
+        CacheSizeState::Unavailable => language
+            .cache_size_state(CacheSizeState::Unavailable)
+            .into(),
+        CacheSizeState::Error => language.cache_size_state(CacheSizeState::Error).into(),
     }
 }
 
@@ -578,51 +625,59 @@ fn cache_status_label(item: &CacheDiscovery) -> String {
 mod tests {
     use super::{InputMode, footer_shortcuts, header_status_text, task_card_supporting_text};
     use crate::app::App;
+    use crate::i18n::Language;
     use crate::models::BackgroundTaskStatus;
 
     #[test]
     fn footer_shortcuts_match_cache_cleanup_page() {
-        let app = App::default();
+        let app = App::new(Language::En);
         assert_eq!(
             footer_shortcuts(&app, InputMode::Normal),
-            "↑↓ 选择   Space 勾选   a 全选   r 重扫   d 删除   ? 帮助   q 退出"
+            "↑↓ Select   Space Toggle   a Select all   r Rescan   d Delete   ? Help   q Quit"
         );
     }
 
     #[test]
     fn footer_shortcuts_match_space_explorer_page() {
-        let mut app = App::default();
+        let mut app = App::new(Language::En);
         app.next_page();
         assert_eq!(
             footer_shortcuts(&app, InputMode::Normal),
-            "↑↓ 选择   Enter 进入   Backspace 返回   / 过滤   o 打开目录   r 重扫   ? 帮助"
+            "↑↓ Select   Enter Open   Backspace Up   / Filter   o Open dir   r Rescan   ? Help"
         );
     }
 
     #[test]
     fn footer_shortcuts_match_filtering_mode() {
-        let mut app = App::default();
+        let mut app = App::new(Language::En);
         app.next_page();
         assert_eq!(
             footer_shortcuts(&app, InputMode::Filtering),
-            "输入关键字   Enter 应用   Esc 取消   Backspace 删除"
+            "Type filter   Enter apply   Esc cancel   Backspace delete"
         );
     }
 
     #[test]
     fn header_status_text_prefers_task_summary_when_task_exists() {
-        let mut app = App::default();
-        app.status_message = "按 ? 查看帮助".into();
-        app.task_status = Some(BackgroundTaskStatus::new("目录扫描", "正在计算大小", true));
+        let mut app = App::new(Language::En);
+        app.status_message = "Press ? for help".into();
+        app.task_status = Some(BackgroundTaskStatus::new(
+            "Directory scan",
+            "Calculating sizes",
+            true,
+        ));
 
-        assert_eq!(header_status_text(&app), "目录扫描 · 正在计算大小");
+        assert_eq!(
+            header_status_text(&app),
+            "Directory scan · Calculating sizes"
+        );
     }
 
     #[test]
     fn task_card_supporting_text_prefers_progress_label() {
-        let mut status = BackgroundTaskStatus::new("目录扫描", "正在计算大小", true);
-        status.progress_label = Some("已完成 3/6".into());
+        let mut status = BackgroundTaskStatus::new("Directory scan", "Calculating sizes", true);
+        status.progress_label = Some("Completed 3/6".into());
 
-        assert_eq!(task_card_supporting_text(&status), "已完成 3/6");
+        assert_eq!(task_card_supporting_text(&status), "Completed 3/6");
     }
 }

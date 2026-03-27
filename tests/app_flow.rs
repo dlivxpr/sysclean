@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use sysclean::app::{ActiveDialog, App, Page};
 use sysclean::cache_cleaner::{CacheDiscovery, CacheSizeState, CacheTargetKind};
+use sysclean::i18n::Language;
 use sysclean::models::{DirectoryEntryInfo, ScanState};
 
 #[test]
 fn app_switches_between_workspace_pages() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
 
     assert_eq!(app.page(), Page::CacheCleanup);
     app.next_page();
@@ -17,7 +18,7 @@ fn app_switches_between_workspace_pages() {
 
 #[test]
 fn app_toggle_cache_selection_marks_current_item() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
     app.set_cache_items(vec![
         CacheDiscovery::new(
             CacheTargetKind::Npm,
@@ -38,7 +39,7 @@ fn app_toggle_cache_selection_marks_current_item() {
 
 #[test]
 fn app_delete_requires_selected_cache_items() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
     let mut cache = CacheDiscovery::new(
         CacheTargetKind::Npm,
         "npm".into(),
@@ -58,7 +59,7 @@ fn app_delete_requires_selected_cache_items() {
 
 #[test]
 fn app_delete_confirmation_waits_for_selected_cache_size_to_finish() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
     let mut npm = CacheDiscovery::new(
         CacheTargetKind::Npm,
         "npm".into(),
@@ -71,12 +72,12 @@ fn app_delete_confirmation_waits_for_selected_cache_size_to_finish() {
     app.open_delete_confirmation();
 
     assert_eq!(app.active_dialog(), ActiveDialog::None);
-    assert!(app.status_message.contains("大小计算完成"));
+    assert!(app.status_message.contains("finish"));
 }
 
 #[test]
 fn app_directory_navigation_tracks_current_path() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
     app.set_current_path(PathBuf::from(r"C:\Users\demo"));
     app.push_directory(PathBuf::from(r"C:\Users\demo\Downloads"));
 
@@ -94,7 +95,7 @@ fn app_directory_navigation_tracks_current_path() {
 
 #[test]
 fn app_directory_navigation_can_show_skeleton_entries_before_sizes_are_ready() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
     app.set_current_path(PathBuf::from(r"C:\Users\demo"));
     app.push_directory(PathBuf::from(r"C:\Users\demo\Projects"));
     app.explorer_state_mut().set_entries(vec![
@@ -134,7 +135,7 @@ fn app_directory_navigation_can_show_skeleton_entries_before_sizes_are_ready() {
 
 #[test]
 fn app_cache_upsert_preserves_selection_and_checked_state() {
-    let mut app = App::default();
+    let mut app = App::new(Language::En);
     let mut npm = CacheDiscovery::new(
         CacheTargetKind::Npm,
         "npm".into(),
@@ -161,4 +162,13 @@ fn app_cache_upsert_preserves_selection_and_checked_state() {
         app.selected_cache().expect("selected").size_state,
         CacheSizeState::Ready
     );
+}
+
+#[test]
+fn app_default_status_message_is_localized() {
+    let english = App::new(Language::En);
+    let chinese = App::new(Language::ZhCn);
+
+    assert_eq!(english.status_message, "Press ? for help");
+    assert_eq!(chinese.status_message, "按 ? 查看帮助");
 }

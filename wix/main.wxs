@@ -84,6 +84,7 @@
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='sysclean Installation'/>
+        <Property Id='TUI_LANGUAGE' Value='en'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
@@ -121,6 +122,27 @@
                                 Source='$(var.CargoTargetBinDir)\sysclean.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='TuiLanguageConfig' Guid='*'>
+                            <RegistryValue
+                                Root='HKLM'
+                                Key='Software\dlivxpr\sysclean'
+                                Name='TuiLanguageConfigured'
+                                Type='integer'
+                                Value='1'
+                                KeyPath='yes'/>
+                            <IniFile
+                                Id='TuiLanguageIni'
+                                Action='addLine'
+                                Directory='Bin'
+                                Name='sysclean.ini'
+                                Section='ui'
+                                Key='language'
+                                Value='[TUI_LANGUAGE]'/>
+                            <RemoveFile
+                                Id='RemoveTuiLanguageIni'
+                                Name='sysclean.ini'
+                                On='uninstall'/>
+                        </Component>
                     </Directory>
                 </Directory>
             </Directory>
@@ -142,6 +164,7 @@
             <ComponentRef Id='License'/>
             
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='TuiLanguageConfig'/>
 
             <Feature
                 Id='Environment'
@@ -169,6 +192,26 @@
         
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
+            <Dialog Id='TuiLanguageDlg' Width='370' Height='270' Title='[ProductName] Setup' NoMinimize='yes'>
+                <Control Id='Title' Type='Text' X='15' Y='6' Width='340' Height='18' Transparent='yes' NoPrefix='yes' Text='Choose the TUI language'/>
+                <Control Id='Description' Type='Text' X='20' Y='32' Width='330' Height='28' Transparent='yes' NoPrefix='yes' Text='This choice affects the SysClean terminal UI only. The installer remains in English.'/>
+                <Control Id='LanguageLabel' Type='Text' X='20' Y='72' Width='220' Height='15' Transparent='yes' NoPrefix='yes' Text='TUI language:'/>
+                <Control Id='LanguageGroup' Type='RadioButtonGroup' X='40' Y='92' Width='220' Height='50' Property='TUI_LANGUAGE'>
+                    <RadioButtonGroup Property='TUI_LANGUAGE'>
+                        <RadioButton Value='en' X='0' Y='0' Width='180' Height='17' Text='English'/>
+                        <RadioButton Value='zh-CN' X='0' Y='20' Width='180' Height='17' Text='Simplified Chinese'/>
+                    </RadioButtonGroup>
+                </Control>
+                <Control Id='Back' Type='PushButton' X='180' Y='243' Width='56' Height='17' Text='&lt; Back'>
+                    <Publish Event='NewDialog' Value='WelcomeDlg'>1</Publish>
+                </Control>
+                <Control Id='Next' Type='PushButton' X='236' Y='243' Width='56' Height='17' Default='yes' Text='Next &gt;'>
+                    <Publish Event='NewDialog' Value='LicenseAgreementDlg'>1</Publish>
+                </Control>
+                <Control Id='Cancel' Type='PushButton' X='304' Y='243' Width='56' Height='17' Cancel='yes' Text='Cancel'>
+                    <Publish Event='SpawnDialog' Value='CancelDlg'>1</Publish>
+                </Control>
+            </Dialog>
             <!--
               Disabling the EULA dialog in the installer is a two step process:
 
@@ -178,6 +221,8 @@
             -->
             <!--<Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>-->
             <!--<Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>-->
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='TuiLanguageDlg' Order='99'>1</Publish>
+            <Publish Dialog='LicenseAgreementDlg' Control='Back' Event='NewDialog' Value='TuiLanguageDlg' Order='99'>1</Publish>
             
         </UI>
 

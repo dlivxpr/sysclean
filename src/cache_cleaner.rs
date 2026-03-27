@@ -7,6 +7,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use crate::i18n::Language;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CacheTargetKind {
     Uv,
@@ -41,16 +43,6 @@ impl CacheTargetKind {
             Self::Pnpm => "pnpm",
             Self::Docker => "docker",
             Self::Cargo => "cargo",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Uv => "Python 包管理器 uv 的全局缓存",
-            Self::Npm => "npm cache 与下载产物",
-            Self::Pnpm => "pnpm store 全局缓存",
-            Self::Docker => "Docker builder cache 与 dangling build cache",
-            Self::Cargo => "Cargo registry 与 git 缓存",
         }
     }
 
@@ -145,7 +137,7 @@ impl CacheDiscovery {
         Self {
             kind,
             label,
-            description: kind.description().to_string(),
+            description: Language::En.cache_description(kind).to_string(),
             path_estimates: paths.iter().cloned().map(CachePathEstimate::new).collect(),
             paths,
             available: true,
@@ -216,26 +208,38 @@ pub struct CleanupProgress {
     pub total_paths: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CleanupExecutionState {
+    total_paths: usize,
+    total_bytes: Option<u64>,
+    completed_paths: usize,
+    completed_bytes: u64,
+}
+
 pub fn discover_cache_target(
     kind: CacheTargetKind,
+    language: Language,
     runner: &impl CommandRunner,
     user_profile: Option<PathBuf>,
     local_app_data: Option<PathBuf>,
 ) -> Result<CacheDiscovery> {
-    let mut discovery = discover_cache_metadata(kind, runner, user_profile, local_app_data)?;
+    let mut discovery =
+        discover_cache_metadata(kind, language, runner, user_profile, local_app_data)?;
     if kind != CacheTargetKind::Docker {
-        populate_cache_size(&mut discovery)?;
+        populate_cache_size(&mut discovery, language)?;
     }
     Ok(discovery)
 }
 
 pub fn discover_cache_metadata(
     kind: CacheTargetKind,
+    language: Language,
     runner: &impl CommandRunner,
     user_profile: Option<PathBuf>,
     local_app_data: Option<PathBuf>,
 ) -> Result<CacheDiscovery> {
     let mut discovery = CacheDiscovery::new(kind, kind.display_name().to_string(), Vec::new());
+    discovery.description = language.cache_description(kind).to_string();
 
     match kind {
         CacheTargetKind::Uv => {
@@ -309,13 +313,13 @@ pub fn discover_cache_metadata(
                 Ok(output) => {
                     discovery.available = true;
                     discovery.size_state = CacheSizeState::Ready;
-                    discovery.note = Some("仅清理 docker builder cache".into());
+                    discovery.note = Some(language.docker_builder_cache_note().into());
                     discovery.reclaimable_bytes = parse_docker_reclaimable(&output.stdout);
                 }
                 Err(_) => {
                     discovery.available = false;
                     discovery.size_state = CacheSizeState::Unavailable;
-                    discovery.note = Some("未检测到 docker CLI 或当前会话不可用".into());
+                    discovery.note = Some(language.docker_unavailable_note().into());
                 }
             }
         }
@@ -330,7 +334,7 @@ pub fn discover_cache_metadata(
         if discovery.paths.is_empty() {
             discovery.available = false;
             discovery.size_state = CacheSizeState::Unavailable;
-            discovery.note = Some("未发现缓存路径".into());
+            discovery.note = Some(language.cache_paths_not_found().into());
         } else {
             discovery.size_state = CacheSizeState::Pending;
         }
@@ -339,7 +343,7 @@ pub fn discover_cache_metadata(
     Ok(discovery)
 }
 
-pub fn populate_cache_size(item: &mut CacheDiscovery) -> Result<()> {
+pub fn populate_cache_size(item: &mut CacheDiscovery, language: Language) -> Result<()> {
     if !item.available {
         item.size_state = CacheSizeState::Unavailable;
         item.reclaimable_bytes = None;
@@ -373,7 +377,7 @@ pub fn populate_cache_size(item: &mut CacheDiscovery) -> Result<()> {
             Err(error) => {
                 had_error = true;
                 estimate.estimated_bytes = None;
-                item.note = Some(format!("{} 统计失败: {error}", estimate.path.display()));
+                item.note = Some(language.path_size_failed(&estimate.path, &error.to_string()));
             }
         }
     }
@@ -388,6 +392,7 @@ pub fn populate_cache_size(item: &mut CacheDiscovery) -> Result<()> {
 }
 
 pub fn discover_all_caches(
+    language: Language,
     runner: &impl CommandRunner,
     user_profile: PathBuf,
     local_app_data: PathBuf,
@@ -397,6 +402,7 @@ pub fn discover_all_caches(
         .map(|kind| {
             discover_cache_target(
                 kind,
+                language,
                 runner,
                 Some(user_profile.clone()),
                 Some(local_app_data.clone()),
@@ -405,7 +411,7 @@ pub fn discover_all_caches(
         .collect::<Result<Vec<_>>>()
         .map(|mut items| {
             for item in &mut items {
-                let _ = populate_cache_size(item);
+                let _ = populate_cache_size(item, language);
             }
             items
         })
@@ -429,13 +435,15 @@ pub fn build_cleanup_preview(items: &[CacheDiscovery]) -> CleanupPreview {
 
 pub fn execute_cleanup(
     items: &[CacheDiscovery],
+    language: Language,
     runner: &impl CommandRunner,
 ) -> Vec<CleanupOutcome> {
-    execute_cleanup_with_progress(items, runner, |_| {})
+    execute_cleanup_with_progress(items, language, runner, |_| {})
 }
 
 pub fn execute_cleanup_with_progress(
     items: &[CacheDiscovery],
+    language: Language,
     runner: &impl CommandRunner,
     mut on_progress: impl FnMut(CleanupProgress),
 ) -> Vec<CleanupOutcome> {
@@ -460,46 +468,38 @@ pub fn execute_cleanup_with_progress(
     } else {
         None
     };
-    let mut completed_paths = 0_usize;
-    let mut completed_bytes = 0_u64;
+    let mut state = CleanupExecutionState {
+        total_paths,
+        total_bytes,
+        completed_paths: 0,
+        completed_bytes: 0,
+    };
 
     selected
         .into_iter()
-        .map(|item| {
-            execute_single_cleanup(
-                item,
-                runner,
-                total_paths,
-                total_bytes,
-                &mut completed_paths,
-                &mut completed_bytes,
-                &mut on_progress,
-            )
-        })
+        .map(|item| execute_single_cleanup(item, language, runner, &mut state, &mut on_progress))
         .collect()
 }
 
 fn execute_single_cleanup(
     item: &CacheDiscovery,
+    language: Language,
     runner: &impl CommandRunner,
-    total_paths: usize,
-    total_bytes: Option<u64>,
-    completed_paths: &mut usize,
-    completed_bytes: &mut u64,
+    state: &mut CleanupExecutionState,
     on_progress: &mut impl FnMut(CleanupProgress),
 ) -> CleanupOutcome {
     // CLI-based cleanup: uv, npm, pnpm, docker all use their official cleanup commands
     if let Some((program, args)) = item.kind.cleanup_command() {
         let estimated = item.cleanup_estimated_bytes();
         let result = runner.run(program, args);
-        *completed_paths += 1;
-        *completed_bytes += estimated;
+        state.completed_paths += 1;
+        state.completed_bytes += estimated;
         on_progress(CleanupProgress {
             current_label: item.label.clone(),
-            completed_bytes: *completed_bytes,
-            total_bytes,
-            completed_paths: *completed_paths,
-            total_paths,
+            completed_bytes: state.completed_bytes,
+            total_bytes: state.total_bytes,
+            completed_paths: state.completed_paths,
+            total_paths: state.total_paths,
         });
         return CleanupOutcome {
             label: item.label.clone(),
@@ -516,33 +516,35 @@ fn execute_single_cleanup(
     let mut skipped = Vec::new();
     for estimate in &item.path_estimates {
         if !estimate.path.exists() {
-            skipped.push(format!("{} 不存在", estimate.path.display()));
-            *completed_paths += 1;
-            *completed_bytes += estimate.estimated_bytes.unwrap_or_default();
+            skipped.push(language.path_missing(&estimate.path));
+            state.completed_paths += 1;
+            state.completed_bytes += estimate.estimated_bytes.unwrap_or_default();
             on_progress(CleanupProgress {
                 current_label: item.label.clone(),
-                completed_bytes: *completed_bytes,
-                total_bytes,
-                completed_paths: *completed_paths,
-                total_paths,
+                completed_bytes: state.completed_bytes,
+                total_bytes: state.total_bytes,
+                completed_paths: state.completed_paths,
+                total_paths: state.total_paths,
             });
             continue;
         }
         match compute_path_size(&estimate.path) {
             Ok(size) => reclaimed += size,
-            Err(error) => skipped.push(format!("{} 统计失败: {error}", estimate.path.display())),
+            Err(error) => {
+                skipped.push(language.path_size_failed(&estimate.path, &error.to_string()))
+            }
         }
         if let Err(error) = remove_path_contents(&estimate.path) {
-            skipped.push(format!("{} 删除失败: {error}", estimate.path.display()));
+            skipped.push(language.path_delete_failed(&estimate.path, &error.to_string()));
         }
-        *completed_paths += 1;
-        *completed_bytes += estimate.estimated_bytes.unwrap_or_default();
+        state.completed_paths += 1;
+        state.completed_bytes += estimate.estimated_bytes.unwrap_or_default();
         on_progress(CleanupProgress {
             current_label: item.label.clone(),
-            completed_bytes: *completed_bytes,
-            total_bytes,
-            completed_paths: *completed_paths,
-            total_paths,
+            completed_bytes: state.completed_bytes,
+            total_bytes: state.total_bytes,
+            completed_paths: state.completed_paths,
+            total_paths: state.total_paths,
         });
     }
     CleanupOutcome {

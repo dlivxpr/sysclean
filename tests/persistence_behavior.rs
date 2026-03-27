@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
+use sysclean::i18n::Language;
 use sysclean::models::{DirectoryEntryInfo, ScanState};
 use sysclean::persistence::{CacheSnapshot, ScanCache};
 use sysclean::space_explorer::load_directory_entries;
@@ -62,7 +63,8 @@ fn cached_directory_entries_are_marked_as_cached_when_reused() {
     };
 
     cache.save_snapshot(&snapshot).expect("save snapshot");
-    let (entries, from_cache) = load_directory_entries(&path, &cache).expect("load entries");
+    let (entries, from_cache) =
+        load_directory_entries(&path, &cache, Language::En).expect("load entries");
 
     assert!(from_cache);
     assert_eq!(entries[0].scan_state, ScanState::Cached);

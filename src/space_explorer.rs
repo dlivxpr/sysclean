@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::cache_cleaner::compute_path_size;
+use crate::i18n::Language;
 use crate::models::DirectoryEntryInfo;
 use crate::persistence::{CacheSnapshot, ScanCache};
 
@@ -26,14 +27,17 @@ pub fn recommended_worker_count(job_count: usize) -> usize {
         .min(job_count)
 }
 
-pub fn discover_directory_skeleton(path: &Path) -> Result<Vec<DirectoryEntryInfo>> {
+pub fn discover_directory_skeleton(
+    path: &Path,
+    language: Language,
+) -> Result<Vec<DirectoryEntryInfo>> {
     let mut items = Vec::new();
     for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
         let entry = match entry {
             Ok(value) => value,
             Err(error) => {
                 items.push(DirectoryEntryInfo::new_error(
-                    "<未知>".into(),
+                    language.unknown_entry_name().into(),
                     PathBuf::from(path),
                     error.to_string(),
                 ));
@@ -58,7 +62,7 @@ pub fn discover_directory_skeleton(path: &Path) -> Result<Vec<DirectoryEntryInfo
             items.push(DirectoryEntryInfo::new_skipped(
                 name,
                 child_path,
-                "符号链接或 junction 已跳过",
+                language.skipped_symlink(),
             ));
             continue;
         }
@@ -74,6 +78,7 @@ pub fn discover_directory_skeleton(path: &Path) -> Result<Vec<DirectoryEntryInfo
 pub fn load_directory_entries(
     path: &Path,
     cache: &ScanCache,
+    language: Language,
 ) -> Result<(Vec<DirectoryEntryInfo>, bool)> {
     if let Some(snapshot) = cache.load_snapshot(path)?
         && snapshot.is_fresh(ChronoDuration::hours(24))
@@ -91,7 +96,7 @@ pub fn load_directory_entries(
         return Ok((entries, true));
     }
 
-    let entries = scan_directory_entries(path)?;
+    let entries = scan_directory_entries(path, language)?;
     let snapshot = CacheSnapshot {
         path: path.to_path_buf(),
         captured_at: Utc::now(),
@@ -101,8 +106,8 @@ pub fn load_directory_entries(
     Ok((entries, false))
 }
 
-pub fn scan_directory_entries(path: &Path) -> Result<Vec<DirectoryEntryInfo>> {
-    let mut items = discover_directory_skeleton(path)?;
+pub fn scan_directory_entries(path: &Path, language: Language) -> Result<Vec<DirectoryEntryInfo>> {
+    let mut items = discover_directory_skeleton(path, language)?;
     for item in &mut items {
         if !item.can_enter || item.scan_state == crate::models::ScanState::Skipped {
             continue;

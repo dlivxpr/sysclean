@@ -59,6 +59,12 @@ On first launch, the app automatically:
 1. Discovers supported cache targets and starts computing their sizes in the background
 2. Opens the Space Explorer at your `$HOME` directory, showing the skeleton first
 
+If you install SysClean through the MSI package:
+
+- The installer UI stays in English
+- You can choose the TUI language during installation: `English` or `Simplified Chinese`
+- The chosen TUI language is fixed at install time; to change it later, reinstall and pick a different language
+
 ---
 
 ## Usage

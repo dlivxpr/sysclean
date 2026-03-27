@@ -5,6 +5,7 @@ use sysclean::cache_cleaner::{
     CacheDiscovery, CacheSizeState, CacheTargetKind, build_cleanup_preview,
     execute_cleanup_with_progress, populate_cache_size,
 };
+use sysclean::i18n::Language;
 
 #[test]
 fn cache_discovery_can_exist_before_size_calculation_finishes() {
@@ -61,7 +62,7 @@ fn populate_cache_size_records_estimates_for_each_path() {
         vec![first.clone(), second.clone()],
     );
 
-    populate_cache_size(&mut item).expect("size calculation");
+    populate_cache_size(&mut item, Language::En).expect("size calculation");
 
     assert_eq!(item.total_bytes, 48);
     assert_eq!(item.path_estimates.len(), 2);
@@ -96,6 +97,7 @@ fn cleanup_progress_reports_estimated_bytes_per_path() {
     let mut completed_bytes = Vec::new();
     let results = execute_cleanup_with_progress(
         &[cargo],
+        Language::En,
         &sysclean::cache_cleaner::SystemCommandRunner,
         |progress| {
             completed_bytes.push(progress.completed_bytes);

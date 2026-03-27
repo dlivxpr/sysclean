@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::cache_cleaner::{CacheDiscovery, CacheSizeState, CleanupPreview, build_cleanup_preview};
+use crate::i18n::Language;
 use crate::models::{BackgroundTaskStatus, DirectoryEntryInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +136,7 @@ impl ExplorerListState {
 
 #[derive(Debug, Clone)]
 pub struct App {
+    language: Language,
     page: Page,
     active_dialog: ActiveDialog,
     cache_items: Vec<CacheDiscovery>,
@@ -151,7 +153,14 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        Self::new(Language::En)
+    }
+}
+
+impl App {
+    pub fn new(language: Language) -> Self {
         Self {
+            language,
             page: Page::CacheCleanup,
             active_dialog: ActiveDialog::None,
             cache_items: Vec::new(),
@@ -161,14 +170,16 @@ impl Default for App {
             path_history: Vec::new(),
             filter_input: String::new(),
             task_status: None,
-            status_message: "按 ? 查看帮助".into(),
+            status_message: language.help_hint().into(),
             last_cleanup_preview: None,
             help_visible: false,
         }
     }
-}
 
-impl App {
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
     pub fn page(&self) -> Page {
         self.page
     }
@@ -296,15 +307,16 @@ impl App {
             .collect::<Vec<_>>();
         if !waiting_items.is_empty() {
             self.active_dialog = ActiveDialog::None;
-            self.status_message =
-                format!("请等待所选缓存大小计算完成: {}", waiting_items.join(", "));
+            self.status_message = self
+                .language
+                .wait_for_selected_cache_sizes(&waiting_items.join(", "));
             self.last_cleanup_preview = None;
             return;
         }
         let preview = build_cleanup_preview(&self.cache_items);
         if preview.items.is_empty() {
             self.active_dialog = ActiveDialog::None;
-            self.status_message = "请先选择至少一个缓存项".into();
+            self.status_message = self.language.select_at_least_one_cache().into();
             self.last_cleanup_preview = None;
             return;
         }

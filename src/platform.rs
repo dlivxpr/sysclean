@@ -3,25 +3,27 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
-pub fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().ok_or_else(|| anyhow!("无法定位当前用户目录"))
+use crate::i18n::Language;
+
+pub fn home_dir(language: Language) -> Result<PathBuf> {
+    dirs::home_dir().ok_or_else(|| anyhow!(language.home_dir_not_found()))
 }
 
-pub fn local_app_data_dir() -> Result<PathBuf> {
-    dirs::data_local_dir().ok_or_else(|| anyhow!("无法定位 LocalAppData 目录"))
+pub fn local_app_data_dir(language: Language) -> Result<PathBuf> {
+    dirs::data_local_dir().ok_or_else(|| anyhow!(language.local_app_data_not_found()))
 }
 
-pub fn app_cache_file() -> Result<PathBuf> {
+pub fn app_cache_file(language: Language) -> Result<PathBuf> {
     let base = dirs::cache_dir()
         .or_else(dirs::data_local_dir)
-        .ok_or_else(|| anyhow!("无法定位应用缓存目录"))?;
+        .ok_or_else(|| anyhow!(language.app_cache_dir_not_found()))?;
     Ok(base.join("sysclean").join("scan-cache.json"))
 }
 
-pub fn open_in_explorer(path: &Path) -> Result<()> {
+pub fn open_in_explorer(path: &Path, language: Language) -> Result<()> {
     Command::new("explorer")
         .arg(path)
         .status()
-        .with_context(|| format!("无法打开资源管理器: {}", path.display()))?;
+        .with_context(|| language.open_in_explorer_failed(path))?;
     Ok(())
 }
