@@ -90,21 +90,23 @@ Releases are fully automated via GitHub Actions (`.github/workflows/release.yml`
 
 1. **Bump version** in `Cargo.toml` (e.g. `version = "0.3.2"`).
    - `cargo-wix` reads the version from `Cargo.toml` automatically; do **not** edit `wix/main.wxs`.
-2. **Commit the change** and push to `master`:
+2. **Update `Cargo.lock`** — for binary projects, lockfile must stay in sync. Commit both files together:
    ```powershell
-   git add Cargo.toml
+   git add Cargo.toml Cargo.lock
    git commit -m "chore: bump version to 0.3.2"
    git push origin master
    ```
-3. **Create and push a tag** matching `v*`. The tag name becomes the release title:
+3. **Write release notes** before tagging. Review commits since the last tag (`git log $(git describe --tags --abbrev=0)..HEAD --oneline`) and draft a human-readable summary of user-facing changes, fixes, and deprecations. The CI generates a raw changelog automatically, but the Release page needs an edited description.
+4. **Create and push a tag** matching `v*`. The tag name becomes the release title:
    ```powershell
    git tag v0.3.2
    git push origin v0.3.2
    ```
-4. **GitHub Actions handles the rest:**
+5. **GitHub Actions handles the build:**
    - `build-msi` job (Windows runner): compiles the release binary and builds the MSI via `cargo wix --nocapture`.
    - `release` job (Ubuntu runner): downloads the MSI artifact and creates a GitHub Release with `generate_release_notes: true`, attaching the `.msi` file.
-5. **Verify** the release appears on GitHub with the MSI attached.
+6. **Edit the Release** on GitHub once CI finishes: paste the drafted release notes into the description, keeping or replacing the auto-generated changelog as needed.
+7. **Verify** the release appears with the MSI attached and readable notes.
 
 ## Test Organization
 
