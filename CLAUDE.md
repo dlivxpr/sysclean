@@ -82,6 +82,30 @@ Deletion is gated: only items whose `size_state == Ready` can be selected for cl
 
 `.cargo/config.toml` sets `rustflags = ["-C", "target-feature=+crt-static"]` for the MSVC target so the binary has no runtime dependency on the Visual C++ Redistributable. The project uses Rust edition 2024 (requires 1.85+).
 
+## Release Workflow
+
+Releases are fully automated via GitHub Actions (`.github/workflows/release.yml`). Pushing a `v*` tag triggers the pipeline.
+
+### Steps to publish a new version
+
+1. **Bump version** in `Cargo.toml` (e.g. `version = "0.3.2"`).
+   - `cargo-wix` reads the version from `Cargo.toml` automatically; do **not** edit `wix/main.wxs`.
+2. **Commit the change** and push to `master`:
+   ```powershell
+   git add Cargo.toml
+   git commit -m "chore: bump version to 0.3.2"
+   git push origin master
+   ```
+3. **Create and push a tag** matching `v*`. The tag name becomes the release title:
+   ```powershell
+   git tag v0.3.2
+   git push origin v0.3.2
+   ```
+4. **GitHub Actions handles the rest:**
+   - `build-msi` job (Windows runner): compiles the release binary and builds the MSI via `cargo wix --nocapture`.
+   - `release` job (Ubuntu runner): downloads the MSI artifact and creates a GitHub Release with `generate_release_notes: true`, attaching the `.msi` file.
+5. **Verify** the release appears on GitHub with the MSI attached.
+
 ## Test Organization
 
 - `tests/` contains integration tests covering cache discovery, explorer paging/filtering, persistence, progressive scanning, and app state transitions.
