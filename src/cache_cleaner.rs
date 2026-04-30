@@ -615,13 +615,17 @@ pub fn compute_path_size(path: &Path) -> Result<u64> {
 
     let mut total = 0;
     for entry in WalkDir::new(path).follow_links(false) {
-        let entry = entry?;
-        let file_type = entry.file_type();
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_file() {
-            total += entry.metadata()?.len();
+        match entry {
+            Ok(entry) => {
+                let file_type = entry.file_type();
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_file() && let Ok(metadata) = entry.metadata() {
+                    total += metadata.len();
+                }
+            }
+            Err(_) => continue,
         }
     }
     Ok(total)

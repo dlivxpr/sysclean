@@ -27,6 +27,16 @@ pub fn recommended_worker_count(job_count: usize) -> usize {
         .min(job_count)
 }
 
+fn is_windows_reserved_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or(name);
+    let upper = base.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(upper.as_str(),
+            "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        )
+}
+
 pub fn discover_directory_skeleton(
     path: &Path,
     language: Language,
@@ -46,6 +56,9 @@ pub fn discover_directory_skeleton(
         };
         let child_path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        if is_windows_reserved_name(&name) {
+            continue;
+        }
         let metadata = match fs::symlink_metadata(&child_path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -71,7 +84,7 @@ pub fn discover_directory_skeleton(
         }
         items.push(DirectoryEntryInfo::new_pending(name, child_path, true));
     }
-    items.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    items.sort_by_key(|item| item.name.to_lowercase());
     Ok(items)
 }
 

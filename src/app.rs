@@ -225,8 +225,7 @@ impl App {
             return;
         }
         self.cache_items.push(item);
-        self.cache_items
-            .sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+        self.cache_items.sort_by_key(|item| item.label.to_lowercase());
         self.cache_selected_index = self
             .cache_items
             .iter()
